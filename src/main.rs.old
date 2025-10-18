@@ -1,0 +1,679 @@
+// main.rs
+// OS-level cursor clicking (xdotool) with screenshot→display coordinate mapping.
+// - Headful Chrome in VNC/X11 (DISPLAY_VNC, default :1)
+// - Kiosk/fullscreen + device scale factor 1 (viewport ~ screen)
+// - Reset zoom to 100% via OS keystroke (ctrl+0)
+// - LLM returns (x,y) in screenshot space; we map to display space and click with xdotool.
+// - No inline JS is used for clicking.
+
+use anyhow::{bail, Context, Result};
+use base64::Engine;
+use serde::{Deserialize, Serialize};
+use serde_json;
+use std::convert::TryInto;
+use std::env;
+use std::fs;
+use std::fs::File;
+use std::io::{self, Write};
+use std::net::TcpStream;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use thirtyfour::prelude::*;
+use tokio::time::sleep;
+use which::which;
+
+// ================= OpenAI wiring =================
+
+#[derive(Debug, Clone)]
+struct OpenAIConfig {
+    api_key: String,
+    base_url: String, // allow override for proxies/azure; default official
+    model: String,    // default "gpt-4o-mini"
+    timeout: Duration,
+    max_retries: usize,
+}
+
+impl OpenAIConfig {
+    fn from_env() -> Result<Self> {
+        Ok(Self {
+            api_key: env::var("OPENAI_API_KEY")
+                .context("Set OPENAI_API_KEY in your environment")?,
+            base_url: env::var("OPENAI_BASE_URL")
+                .unwrap_or_else(|_| "https://api.openai.com/v1".to_string()),
+            model: env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string()),
+            timeout: Duration::from_secs(
+                env::var("OPENAI_TIMEOUT_SECS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(60),
+            ),
+            max_retries: env::var("OPENAI_MAX_RETRIES")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(3),
+        })
+    }
+}
+
+#[derive(Serialize)]
+struct ChatRequest<'a> {
+    model: &'a str,
+    messages: Vec<ChatMessage>,
+    temperature: f32,
+    response_format: ResponseFormat, // request JSON-only output on Chat API
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ContentPart {
+    Text { text: String },
+    ImageUrl { image_url: ImageUrl },
+}
+
+#[derive(Serialize)]
+struct ImageUrl {
+    url: String,
+}
+
+/// Chat API accepts either a string "content" OR an array of content parts.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum ChatContent {
+    Text(String),
+    Parts(Vec<ContentPart>),
+}
+
+#[derive(Serialize)]
+struct ChatMessage {
+    role: &'static str,
+    content: ChatContent,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ResponseFormat {
+    JsonObject,
+}
+
+#[derive(Deserialize, Debug)]
+struct ChatResponse {
+    choices: Vec<Choice>,
+}
+
+#[derive(Deserialize, Debug)]
+struct Choice {
+    message: ChoiceMessage,
+}
+
+#[derive(Deserialize, Debug)]
+struct ChoiceMessage {
+    content: String,
+}
+
+// LLM output -> viewport point (in screenshot pixel space)
+#[derive(Deserialize, Debug)]
+struct ViewportPoint {
+    x: i32,
+    y: i32,
+    #[serde(default)]
+    double: bool,
+}
+
+async fn call_openai_for_point(
+    cfg: &OpenAIConfig,
+    screenshot_png: &[u8],
+    user_prompt: &str,
+) -> Result<ViewportPoint> {
+    let client = reqwest::Client::builder().timeout(cfg.timeout).build()?;
+
+    // Base64-embed the screenshot as data URL for vision input.
+    let b64 = base64::engine::general_purpose::STANDARD.encode(screenshot_png);
+    let data_url = format!("data:image/png;base64,{}", b64);
+
+    let req_body = ChatRequest {
+        model: &cfg.model,
+        temperature: 0.0,
+        response_format: ResponseFormat::JsonObject, // "json only"
+        messages: vec![
+            ChatMessage {
+                role: "system",
+                content: ChatContent::Text(
+                    "Return ONLY JSON matching {x:int,y:int,double:bool}. \
+                     Coordinates are CSS pixels relative to the visible page (top-left). \
+                     If unsure, estimate."
+                        .to_string(),
+                ),
+            },
+            ChatMessage {
+                role: "user",
+                content: ChatContent::Parts(vec![
+                    ContentPart::Text {
+                        text: format!("{user_prompt}\nReturn only JSON, no prose."),
+                    },
+                    ContentPart::ImageUrl {
+                        image_url: ImageUrl { url: data_url },
+                    },
+                ]),
+            },
+        ],
+    };
+
+    let url = format!("{}/chat/completions", cfg.base_url);
+
+    let mut last_err: Option<anyhow::Error> = None;
+    for attempt in 0..cfg.max_retries {
+        let resp = client
+            .post(&url)
+            .bearer_auth(&cfg.api_key)
+            .json(&req_body)
+            .send()
+            .await;
+
+        match resp {
+            Ok(r) => {
+                if !r.status().is_success() {
+                    let status = r.status();
+                    let text = r.text().await.unwrap_or_default();
+                    last_err = Some(anyhow::anyhow!("OpenAI HTTP {}: {}", status, text));
+                } else {
+                    let parsed: ChatResponse = r.json().await?;
+                    let content = parsed
+                        .choices
+                        .get(0)
+                        .ok_or_else(|| anyhow::anyhow!("No choices from OpenAI"))?
+                        .message
+                        .content
+                        .trim()
+                        .to_string();
+
+                    match serde_json::from_str::<ViewportPoint>(&content) {
+                        Ok(pt) => return Ok(pt),
+                        Err(e) => {
+                            last_err = Some(anyhow::anyhow!(
+                                "Failed to parse JSON from OpenAI: {}\nRaw content: {}",
+                                e,
+                                content
+                            ));
+                        }
+                    }
+                }
+            }
+            Err(e) => last_err = Some(anyhow::anyhow!(e)),
+        }
+
+        if attempt + 1 < cfg.max_retries {
+            tokio::time::sleep(Duration::from_millis(400 * (attempt as u64 + 1))).await;
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("OpenAI request failed")))
+}
+
+// =================== OS-level cursor via xdotool ===================
+
+fn ensure_xdotool() -> Result<()> {
+    which("xdotool").context("xdotool not found. Install it (e.g., apt-get install xdotool).")?;
+    Ok(())
+}
+
+/// Display size from xdotool.
+fn get_display_geometry(display: &str) -> Result<(i32, i32)> {
+    let out = Command::new("xdotool")
+        .env("DISPLAY", display)
+        .args(["getdisplaygeometry"])
+        .output()
+        .context("failed to run xdotool getdisplaygeometry")?;
+
+    if !out.status.success() {
+        bail!(
+            "xdotool getdisplaygeometry failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let s = String::from_utf8_lossy(&out.stdout);
+    let mut it = s.split_whitespace();
+    let w: i32 = it.next().ok_or_else(|| anyhow::anyhow!("no width"))?.parse()?;
+    let h: i32 = it.next().ok_or_else(|| anyhow::anyhow!("no height"))?.parse()?;
+    Ok((w, h))
+}
+
+/// Move the *real* OS cursor (visible in VNC) and click.
+fn xdotool_move_and_click(display: &str, x: i32, y: i32, double: bool) -> Result<()> {
+    let status = Command::new("xdotool")
+        .env("DISPLAY", display)
+        .args(["mousemove", "--sync", &x.to_string(), &y.to_string()])
+        .status()
+        .context("xdotool mousemove failed")?;
+    if !status.success() {
+        bail!("xdotool mousemove returned non-zero status");
+    }
+
+    let status = Command::new("xdotool")
+        .env("DISPLAY", display)
+        .args(["click", "1"])
+        .status()
+        .context("xdotool click failed")?;
+    if !status.success() {
+        bail!("xdotool click returned non-zero status");
+    }
+
+    if double {
+        let status = Command::new("xdotool")
+            .env("DISPLAY", display)
+            .args(["click", "1"])
+            .status()
+            .context("xdotool second click failed")?;
+        if !status.success() {
+            bail!("xdotool second click returned non-zero status");
+        }
+    }
+    Ok(())
+}
+
+/// Send Ctrl+0 to reset browser zoom to 100% (no JS).
+fn reset_zoom(display: &str) -> Result<()> {
+    for _ in 0..2 {
+        let st = Command::new("xdotool")
+            .env("DISPLAY", display)
+            .args(["key", "--clearmodifiers", "ctrl+0"])
+            .status()
+            .context("xdotool key ctrl+0 failed")?;
+        if !st.success() {
+            bail!("xdotool key returned non-zero status");
+        }
+    }
+    Ok(())
+}
+
+// =================== Screenshot→Display mapping ===================
+
+/// Read PNG width/height from IHDR (no extra crate).
+fn png_dimensions(bytes: &[u8]) -> Result<(u32, u32)> {
+    const PNG_SIG: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
+    if bytes.len() < 24 || &bytes[..8] != PNG_SIG {
+        bail!("Not a PNG or too small");
+    }
+    let w = u32::from_be_bytes(bytes[16..20].try_into().unwrap());
+    let h = u32::from_be_bytes(bytes[20..24].try_into().unwrap());
+    Ok((w, h))
+}
+
+/// Map LLM (screenshot px) -> screen px, with clamping.
+fn map_to_screen(display: &str, screenshot_png: &[u8], x: i32, y: i32) -> Result<(i32, i32)> {
+    let (sw, sh) = png_dimensions(screenshot_png)?;
+    let (dw, dh) = get_display_geometry(display)?;
+    let sx = (dw as f64) / (sw as f64);
+    let sy = (dh as f64) / (sh as f64);
+    let x_screen = ((x as f64) * sx).round() as i32;
+    let y_screen = ((y as f64) * sy).round() as i32;
+    let xs = x_screen.clamp(0, dw.saturating_sub(1));
+    let ys = y_screen.clamp(0, dh.saturating_sub(1));
+    Ok((xs, ys))
+}
+
+// =============== Your existing code + coord/LLM support =================
+
+/// Holds info about a clickable element listed in the CLI (for index mode).
+struct ClickableElement {
+    element: WebElement,
+    description: String,
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    // Optional: load .env for local dev without exporting.
+    let _ = dotenvy::dotenv();
+
+    ensure_xdotool()?;
+
+    println!("🚀 Starting Interactive WebDriver (VNC headful, OS-cursor)…");
+
+    // ---- Config via env ----
+    let login_url = env::var("LOGIN_URL")
+        .context("Set LOGIN_URL (e.g. export LOGIN_URL='https://example.com')")?;
+
+    // HEADFUL=1 => render to VNC; default true so you see it in noVNC.
+    let headful = env::var("HEADFUL").map_or(true, |v| v == "1");
+
+    // Which X display should Chrome render to (your TigerVNC is :1).
+    let display = env::var("DISPLAY_VNC").unwrap_or_else(|_| String::from(":1"));
+
+    // Port for chromedriver.
+    let driver_port: u16 = env::var("CHROMEDRIVER_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(9515);
+
+    // ---- Spawn chromedriver with DISPLAY=:1 so Chrome paints into VNC ----
+    let chromedriver_path =
+        which("chromedriver").context("chromedriver not found in PATH. Install it or add to PATH.")?;
+
+    let xauth = guess_xauthority()?;
+
+    // Log chromedriver output to ~/chromedriver.log for easy debugging.
+    let log_file = File::create(log_path()).context("cannot create chromedriver.log")?;
+
+    let mut chromedriver = spawn_chromedriver(
+        chromedriver_path.as_path(),
+        driver_port,
+        &display,
+        xauth.as_deref(),
+        log_file,
+    )?;
+    wait_for_port("127.0.0.1", driver_port, Duration::from_secs(10))
+        .context("chromedriver did not become ready on time")?;
+
+    // ---- Build Chrome caps ----
+    let mut caps = DesiredCapabilities::chrome();
+
+    // Choose chrome/chromium binary if not provided via CHROME_BIN.
+    if let Ok(bin) = env::var("CHROME_BIN") {
+        caps.set_binary(&bin)?;
+    } else if let Some(bin) = find_chrome_bin() {
+        caps.set_binary(&bin)?;
+    }
+
+    // Fresh profile dir each run to avoid "in use" errors.
+    let timestamp_ms = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
+    let mut user_data_dir = env::temp_dir();
+    user_data_dir.push(format!("interactive-webdriver-{}", timestamp_ms));
+    caps.add_arg(&format!("--user-data-dir={}", user_data_dir.to_string_lossy()))?;
+
+    // Force fullscreen/kiosk so viewport ≈ screen coords.
+    // (kiosk removes UI chrome like tabs/bookmarks bars)
+    //caps.add_arg("--kiosk")?;
+    caps.add_arg("--force-device-scale-factor=1")?;
+    caps.add_arg("--high-dpi-support=1")?;
+    caps.add_arg("--window-position=0,0")?;
+    // window-size is ignored by kiosk; kept for robustness
+    caps.add_arg("--window-size=640,400")?;
+
+    // Headful check
+    if headful {
+        println!("🖥️  HEADFUL=1 → Chrome will render on DISPLAY {}", display);
+    } else {
+        println!("⚠️ Headless disabled for OS-cursor mode. Set HEADFUL=1.");
+        bail!("OS-level cursor requires headful mode/VNC.");
+    }
+
+    // Helpful flags in VNC/container environments
+    caps.add_arg("--disable-gpu")?;
+    caps.add_arg("--no-sandbox")?;
+    caps.add_arg("--disable-dev-shm-usage")?;
+    caps.add_arg("--no-default-browser-check")?;
+    caps.add_arg("--no-first-run")?;
+
+    // ---- Connect to chromedriver ----
+    let driver_url = format!("http://127.0.0.1:{driver_port}");
+    let driver = WebDriver::new(&driver_url, caps).await?;
+
+    // Make sure it's actually fullscreen (kiosk should do this; harmless if already).
+    //let _ = driver.fullscreen_window().await;
+
+    // ---- Main loop ----
+    let result = run_interactive_loop(&driver, &login_url, &display).await;
+
+    println!("\n👋 Shutting down WebDriver session…");
+    let _ = driver.quit().await;
+
+    // Kill chromedriver we spawned (best-effort).
+    terminate_child(&mut chromedriver);
+
+    // Remove the temp user-data-dir.
+    let _ = fs::remove_dir_all(&user_data_dir);
+
+    result
+}
+
+/// Main interactive loop: scan, list clickables, element click, coord-click (OS cursor), LLM-click (OS cursor).
+async fn run_interactive_loop(driver: &WebDriver, url: &str, display: &str) -> Result<()> {
+    println!("\n🌐 Navigating to {} …", url);
+    driver.goto(url).await?;
+    sleep(Duration::from_secs(2)).await;
+
+    // Reset browser zoom to 100% for stable mapping
+    reset_zoom(display)?;
+
+    // OpenAI config is optional until user calls `l ...`
+    let openai_cfg = OpenAIConfig::from_env().ok();
+
+    let mut clickables: Vec<ClickableElement>;
+
+    loop {
+        clickables = scan_for_clickables(driver).await?;
+        display_clickables(&clickables);
+
+        io::stdout().flush()?;
+
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        let choice = input.trim();
+
+        if choice == "q" {
+            println!("Exiting interactive loop.");
+            break;
+        } else if choice == "r" {
+            println!("\n🔄 Rescanning page and taking screenshot…");
+            take_and_show_screenshot(driver).await?;
+            continue;
+        } else if let Some(rest) = choice.strip_prefix("c ") {
+            // Coord-click with JSON using OS cursor (coords provided by user, screenshot-independent)
+            match serde_json::from_str::<ViewportPoint>(rest.trim()) {
+                Ok(pt) => {
+                    // Click raw screen coords (assume user knows they are screen px)
+                    let (dw, dh) = get_display_geometry(display)?;
+                    let sx = pt.x.clamp(0, dw.saturating_sub(1));
+                    let sy = pt.y.clamp(0, dh.saturating_sub(1));
+                    println!("🧭 OS-cursor click at screen {},{} (double={})", sx, sy, pt.double);
+                    xdotool_move_and_click(display, sx, sy, pt.double)?;
+                    println!("✅ Clicked. Waiting for page to settle…");
+                    sleep(Duration::from_secs(3)).await;
+                }
+                Err(e) => {
+                    println!("❌ Could not parse JSON after 'c ': {e}");
+                    println!("   Example: c {{\"x\":240,\"y\":380}}");
+                }
+            }
+            continue;
+        } else if let Some(prompt) = choice.strip_prefix("l ") {
+            // LLM-driven click: screenshot → OpenAI → map to display → OS cursor click
+            let cfg = match &openai_cfg {
+                Some(c) => c,
+                None => {
+                    println!("❌ OPENAI_API_KEY / config not set. Set at least OPENAI_API_KEY.");
+                    continue;
+                }
+            };
+
+            println!("📸 Capturing screenshot for LLM analysis…");
+            let (path, bytes) = screenshot_bytes(driver, "screenshot.png").await?;
+            println!("   Saved {}", path);
+
+            // Calibration
+            let (sw, sh) = png_dimensions(&bytes)?;
+            let (dw, dh) = get_display_geometry(display)?;
+            println!("🧭 Calibration: screenshot={}x{}, display={}x{}", sw, sh, dw, dh);
+
+            println!("🤖 Asking OpenAI (model: {}) for click coords…", cfg.model);
+            match call_openai_for_point(cfg, &bytes, prompt).await {
+                Ok(pt) => {
+                    let (sx, sy) = map_to_screen(display, &bytes, pt.x, pt.y)?;
+                    println!(
+                        "   ↳ OpenAI viewport: ({},{})  → screen: ({},{})  double={}",
+                        pt.x, pt.y, sx, sy, pt.double
+                    );
+                    xdotool_move_and_click(display, sx, sy, pt.double)?;
+                    println!("✅ Clicked. Waiting for page to settle…");
+                    sleep(Duration::from_secs(3)).await;
+                }
+                Err(e) => {
+                    println!("❌ OpenAI error: {e}");
+                }
+            }
+            continue;
+        }
+
+        // Fallback: index click (element-based, uses WebDriver, not OS cursor)
+        if let Ok(index) = choice.parse::<usize>() {
+            if (1..=clickables.len()).contains(&index) {
+                let el = &clickables[index - 1];
+                println!("\n🖱️ Clicking element #{}: {}", index, el.description);
+                el.element.click().await?;
+                println!("✅ Clicked. Waiting for page to settle…");
+                sleep(Duration::from_secs(3)).await;
+            } else {
+                println!("❌ Invalid number. Choose an index from the list.");
+            }
+        } else {
+            println!("❌ Invalid command. Try: number | c {{\"x\":..}} | l prompt | r | q");
+        }
+    }
+    Ok(())
+}
+
+/// Find a broad set of "clickables" with a single CSS compound selector.
+async fn scan_for_clickables(driver: &WebDriver) -> Result<Vec<ClickableElement>> {
+    println!("\n🔍 Scanning for clickable elements…");
+    let selector = "button, a, input[type='submit'], [role='button']";
+    let found = driver.find_all(By::Css(selector)).await?;
+    let mut out = Vec::with_capacity(found.len());
+
+    for elem in found.into_iter() {
+        let tag = elem.tag_name().await?.to_lowercase();
+        let mut text = elem.text().await?.trim().to_string();
+        if text.len() > 60 {
+            text = format!("{}...", &text[..57]);
+        }
+        text = text.replace('\n', " ");
+
+        let mut attrs = Vec::new();
+        if let Some(id_attr) = elem.attr("id").await? {
+            attrs.push(format!("#{}", id_attr));
+        }
+        if let Some(name) = elem.attr("name").await? {
+            attrs.push(format!("[name='{}']", name));
+        }
+        if let Some(label) = elem.attr("aria-label").await? {
+            attrs.push(format!("[aria-label='{}']", label));
+        }
+
+        let description = format!("<{}> \"{}\" {}", tag, text, attrs.join(" "));
+        out.push(ClickableElement { element: elem, description });
+    }
+
+    if out.is_empty() {
+        println!("… No clickable elements found.");
+    } else {
+        println!("… Found {} clickable elements.", out.len());
+    }
+    Ok(out)
+}
+
+/// Pretty-print the list of clickables.
+fn display_clickables(elements: &[ClickableElement]) {
+    if elements.is_empty() {
+        return;
+    }
+    println!("\n--- Clickable Elements ---");
+    for (i, el) in elements.iter().enumerate() {
+        println!("{:>3}: {}", i + 1, el.description);
+    }
+    println!("--------------------------");
+}
+
+/// Save a screenshot and show it via `viu` if available.
+async fn take_and_show_screenshot(driver: &WebDriver) -> Result<()> {
+    let path = "screenshot.png";
+    let png = driver.screenshot_as_png().await?;
+    fs::write(path, &png)?;
+    println!("📸 Screenshot saved to '{}'", path);
+
+    match Command::new("viu").arg(path).status() {
+        Ok(st) if st.success() => {}
+        _ => println!("(Tip) Install `viu` to preview screenshots in the terminal: `cargo install viu`"),
+    }
+    Ok(())
+}
+
+/// Capture screenshot and return (path, bytes).
+async fn screenshot_bytes(driver: &WebDriver, path: &str) -> Result<(String, Vec<u8>)> {
+    let png = driver.screenshot_as_png().await?;
+    fs::write(path, &png)?;
+    Ok((path.to_string(), png))
+}
+
+/// Try to locate the Xauthority cookie for X access to the VNC display.
+fn guess_xauthority() -> Result<Option<PathBuf>> {
+    if let Ok(p) = env::var("XAUTHORITY") {
+        let pb = PathBuf::from(p);
+        if pb.exists() {
+            return Ok(Some(pb));
+        }
+    }
+    if let Ok(home) = env::var("HOME") {
+        let pb = Path::new(&home).join(".Xauthority");
+        if pb.exists() {
+            return Ok(Some(pb));
+        }
+    }
+    Ok(None)
+}
+
+/// Spawn chromedriver with DISPLAY and optional XAUTHORITY, logging to ~/chromedriver.log.
+fn spawn_chromedriver(
+    chromedriver: &Path,
+    port: u16,
+    display: &str,
+    xauthority: Option<&Path>,
+    log_file: File,
+) -> Result<Child> {
+    let mut cmd = Command::new(chromedriver);
+    cmd.arg(format!("--port={}", port))
+        .env("DISPLAY", display)
+        .stdout(Stdio::from(log_file.try_clone()?))
+        .stderr(Stdio::from(log_file));
+    if let Some(xa) = xauthority {
+        cmd.env("XAUTHORITY", xa);
+    }
+    let child = cmd.spawn().with_context(|| "failed to spawn chromedriver")?;
+    Ok(child)
+}
+
+/// Wait until a TCP port accepts connections.
+fn wait_for_port(host: &str, port: u16, timeout: Duration) -> Result<()> {
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        if TcpStream::connect((host, port)).is_ok() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    bail!("port {}:{} did not open within {:?}", host, port, timeout)
+}
+
+/// Kill a spawned child process (best-effort).
+fn terminate_child(child: &mut Child) {
+    let _ = child.kill();
+}
+
+/// Auto-detect a Chrome/Chromium binary.
+fn find_chrome_bin() -> Option<String> {
+    for cand in [
+        "google-chrome",
+        "google-chrome-stable",
+        "chromium-browser",
+        "chromium",
+    ] {
+        if let Ok(p) = which(cand) {
+            return Some(p.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
+/// Where to log chromedriver output.
+fn log_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join("chromedriver.log")
+}
