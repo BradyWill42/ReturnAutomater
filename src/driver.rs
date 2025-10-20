@@ -1,7 +1,7 @@
 // src/driver.rs (windowed, not fullscreen)
 use anyhow::{bail, Context, Result};
 use std::env;
-use std::fs::{self, File};
+use std::fs::File;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -37,7 +37,7 @@ pub async fn init_driver(login_url: &str) -> Result<DriverBundle> {
  
     let log_file = File::create(log_path()).context("cannot create chromedriver.log")?;
  
-    let mut chromedriver = spawn_chromedriver(
+    let chromedriver = spawn_chromedriver(
         chromedriver_path.as_path(),
         driver_port,
         &display,

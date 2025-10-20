@@ -1,7 +1,6 @@
 // src/keyboard.rs
 use anyhow::{bail, Context, Result};
 use std::process::Command;
-use which::which;
 
 
 /// Type literal text into the active window on the given DISPLAY.
