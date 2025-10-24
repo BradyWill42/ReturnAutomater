@@ -2,6 +2,7 @@
 /target
 src/plan.rs
 /.env
+/.env.save
 /.venv
 /screenshot*
 /runs
