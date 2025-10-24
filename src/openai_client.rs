@@ -12,6 +12,9 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::task::JoinSet;
 
+// NEW: simple in-process memory of previously chosen points
+use std::sync::{Mutex, OnceLock};
+
 #[derive(Debug, Clone)]
 pub struct OpenAIConfig {
     pub api_key: String,
@@ -106,6 +109,21 @@ pub struct ViewportPoint {
     pub double: bool,
 }
 
+/* ---------- memory of previously used points (per process) ---------- */
+
+static PREV_POINTS: OnceLock<Mutex<Vec<ViewportPoint>>> = OnceLock::new();
+
+fn prev_points() -> &'static Mutex<Vec<ViewportPoint>> {
+    PREV_POINTS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn format_prev_points(list: &[ViewportPoint]) -> String {
+    list.iter()
+        .map(|p| format!("({}, {})", p.x, p.y))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 pub async fn call_openai_for_point(
     cfg: &OpenAIConfig,
     screenshot_png: &[u8],
@@ -138,7 +156,7 @@ pub async fn call_openai_for_point(
         .unwrap_or(120);
 
     println!(
-        "🤖 Sampling OpenAI {} times (median combine, concurrency={}, stagger={}ms)...",
+        "🤖 Sampling OpenAI {} times (IQR-filtered mean combine, concurrency={}, stagger={}ms)...",
         samples, max_conc, stagger_ms
     );
 
@@ -209,25 +227,6 @@ pub async fn call_openai_for_point(
     Ok(agg)
 }
 
-fn aggregate_points(points: &[ViewportPoint]) -> ViewportPoint {
-    let median = |mut v: Vec<i32>| -> i32 {
-        v.sort_unstable();
-        let n = v.len();
-        if n == 0 { return 0; }
-        if n % 2 == 1 { v[n / 2] } else { (v[n / 2 - 1] + v[n / 2]) / 2 }
-    };
-
-    let xs: Vec<i32> = points.iter().map(|p| p.x).collect();
-    let ys: Vec<i32> = points.iter().map(|p| p.y).collect();
-    let doubles = points.iter().filter(|p| p.double).count();
-
-    ViewportPoint {
-        x: median(xs),
-        y: median(ys),
-        double: doubles * 2 >= points.len(),
-    }
-}
-
 async fn call_openai_once(
     cfg: &OpenAIConfig,
     screenshot_png: &[u8],
@@ -250,32 +249,59 @@ async fn call_openai_once(
     let b64 = base64::engine::general_purpose::STANDARD.encode(&annotated_png);
     let data_url = format!("data:image/png;base64,{}", b64);
 
+    // NEW: build a prompt that lists prior points to avoid
+    let radius_px: i32 = env::var("OPENAI_DEDUP_RADIUS")
+        .ok().and_then(|s| s.parse().ok())
+        .unwrap_or(40);
+
+    let prev_snapshot: Vec<ViewportPoint> = {
+        let guard = prev_points().lock().unwrap();
+        guard.clone()
+    };
+
+    let used_coords_text = if prev_snapshot.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "Previously selected points (avoid selecting within ~{} px of any): [{}]\n",
+            radius_px,
+            format_prev_points(&prev_snapshot)
+        )
+    };
+
+    let full_prompt = format!(
+        "{}{}\nReturn only JSON in the exact form {{\"x\":int,\"y\":int,\"double\":bool}}.",
+        used_coords_text,
+        user_prompt
+    );
+
+    let messages = vec![
+        ChatMessage {
+            role: "system",
+            content: ChatContent::Text(format!(
+                "You are selecting a single click target on the image. \
+                 Output ONLY JSON (no markdown fences, no prose) with keys x:int,y:int,double:bool. \
+                 Coordinates are CSS/viewport pixels relative to the visible page (top-left). \
+                 If a list of previously selected points is provided, \
+                 choose a location at least ~{} px away from all of them. \
+                 If unsure, estimate.",
+                radius_px
+            )),
+        },
+        ChatMessage {
+            role: "user",
+            content: ChatContent::Parts(vec![
+                ContentPart::Text { text: full_prompt },
+                ContentPart::ImageUrl { image_url: ImageUrl { url: data_url } },
+            ]),
+        },
+    ];
+
     let req_body = ChatRequest {
         model: &cfg.model,
         temperature: 0.0,
         response_format: ResponseFormat::JsonObject,
-        messages: vec![
-            ChatMessage {
-                role: "system",
-                content: ChatContent::Text(
-                    "Return ONLY JSON matching {x:int,y:int,double:bool}. \
-                     Coordinates are CSS pixels relative to the visible page (top-left). \
-                     If unsure, estimate."
-                        .to_string(),
-                ),
-            },
-            ChatMessage {
-                role: "user",
-                content: ChatContent::Parts(vec![
-                    ContentPart::Text {
-                        text: format!("{user_prompt}\nReturn only JSON, no prose."),
-                    },
-                    ContentPart::ImageUrl {
-                        image_url: ImageUrl { url: data_url },
-                    },
-                ]),
-            },
-        ],
+        messages,
     };
 
     let url = format!("{}/chat/completions", cfg.base_url);
@@ -312,9 +338,8 @@ async fn call_openai_once(
                 } else {
                     // (optional) read limits for diagnostic
                     if let Some(v) = r.headers().get("x-ratelimit-limit-tokens") {
-                        if let Ok(s) = v.to_str() {
-                            // uncomment if you want to see caps:
-                            // println!("(diag) TPM cap reported: {}", s);
+                        if let Ok(_s) = v.to_str() {
+                            // println!("(diag) TPM cap reported: {}", _s);
                         }
                     }
 
@@ -330,7 +355,13 @@ async fn call_openai_once(
 
                     let cleaned = strip_code_fences(&content);
                     match serde_json::from_str::<ViewportPoint>(cleaned) {
-                        Ok(pt) => return Ok(pt),
+                        Ok(pt) => {
+                            // remember this point for future avoidance
+                            if let Ok(mut guard) = prev_points().lock() {
+                                guard.push(pt);
+                            }
+                            return Ok(pt);
+                        }
                         Err(e) => {
                             last_err = Some(anyhow::anyhow!(
                                 "Failed to parse JSON from OpenAI: {}\nRaw content: {}",
@@ -351,6 +382,59 @@ async fn call_openai_once(
     }
 
     Err(last_err.unwrap_or_else(|| anyhow::anyhow!("OpenAI request failed")))
+}
+
+fn aggregate_points(points: &[ViewportPoint]) -> ViewportPoint {
+    // Compute IQR-based filtered mean
+    fn filtered_mean(mut v: Vec<i32>) -> i32 {
+        if v.is_empty() {
+            return 0;
+        }
+        v.sort_unstable();
+        let n = v.len();
+
+        // If fewer than 4 points, just return mean directly
+        if n < 4 {
+            let sum: i32 = v.iter().sum();
+            return sum / (n as i32);
+        }
+
+        // Compute quartiles (Q1, Q3)
+        let q1 = v[n / 4];
+        let q3 = v[(3 * n) / 4];
+        let iqr = q3 - q1;
+
+        // Define bounds: Q1 - 1.5×IQR, Q3 + 1.5×IQR
+        let lower = q1 - (iqr * 3 / 2);
+        let upper = q3 + (iqr * 3 / 2);
+
+        // Filter out outliers (clone to keep v for fallback)
+        let filtered: Vec<i32> = v
+            .iter()
+            .cloned()
+            .filter(|&x| x >= lower && x <= upper)
+            .collect();
+
+        if filtered.is_empty() {
+            // fallback to mean of all values if everything filtered out
+            let sum: i32 = v.iter().sum();
+            return sum / (n as i32);
+        }
+
+        // Compute mean of filtered
+        let sum: i32 = filtered.iter().sum();
+        sum / (filtered.len() as i32)
+    }
+
+    let xs: Vec<i32> = points.iter().map(|p| p.x).collect();
+    let ys: Vec<i32> = points.iter().map(|p| p.y).collect();
+    let doubles = points.iter().filter(|p| p.double).count();
+
+    ViewportPoint {
+        x: filtered_mean(xs),
+        y: filtered_mean(ys),
+        double: doubles * 2 >= points.len(),
+    }
 }
 
 fn strip_code_fences(s: &str) -> &str {
