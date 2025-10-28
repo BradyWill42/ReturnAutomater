@@ -24,3 +24,16 @@ pub fn type_text(display: &str, text: &str, per_char_delay_ms: u64) -> Result<()
     }
     Ok(())
 }
+
+
+pub fn xdotool_key(display: &str, key: &str) -> Result<()> {
+    let status = Command::new("xdotool")
+        .env("DISPLAY", display)
+        .args(["key", "--clearmodifiers", key])
+        .status()?;
+
+    if !status.success() {
+        bail!("xdotool key failed");
+    }
+    Ok(())
+}

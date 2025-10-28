@@ -14,7 +14,7 @@ use mouse::{ensure_xdotool, reset_zoom, get_active_window_geometry, get_display_
 use coords::{png_dimensions, NormalizationInputs, viewport_to_screen};
 use plan::{AutomationPlan, Step};
 use tokio::time::{sleep, Duration};
-use keyboard::{type_text};
+use keyboard::{type_text, xdotool_key};
  
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -46,6 +46,10 @@ async fn main() -> Result<()> {
 		ensure_xdotool()?;
 		println!("TypeText ({} chars, {}ms/char)", text.len(), per_char_delay_ms);
 		type_text(&display, text, *per_char_delay_ms)?;
+	    }
+	    Step::TypeKey { key } => {
+		println!("Pressing key: {key}");
+		keyboard::xdotool_key(&display, key)?;
 	    }
             Step::ResetZoom => {
                 println!("🔎 Reset zoom → 100%");
