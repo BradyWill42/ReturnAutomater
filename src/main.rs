@@ -109,11 +109,11 @@ async fn main() -> Result<()> {
                 let mut sx = sx.clamp(0, dw.saturating_sub(1));
                 let mut sy = sy.clamp(0, dh.saturating_sub(1));
  
-		let x_off = std::env::var("CLICK_X_OFFSET_PX").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
-		let y_off = std::env::var("CLICK_Y_OFFSET_PX").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+		//let x_off = std::env::var("CLICK_X_OFFSET_PX").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+		//let y_off = std::env::var("CLICK_Y_OFFSET_PX").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
 			
-		sx += x_off;
-		sy += y_off;		
+		//sx += x_off;
+		//sy += y_off;		
 	
                 println!("🖱️ Click screen mapped: ({},{})", sx, sy);
                 xdotool_move_and_click(&display, sx, sy, pt.double)?;

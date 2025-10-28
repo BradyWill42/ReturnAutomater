@@ -109,7 +109,8 @@ pub struct ViewportPoint {
     pub double: bool,
 }
 
-/* ---------- memory of previously used points (per process) ---------- */
+/*
+
 
 static PREV_POINTS: OnceLock<Mutex<Vec<ViewportPoint>>> = OnceLock::new();
 
@@ -124,6 +125,8 @@ fn format_prev_points(list: &[ViewportPoint]) -> String {
         .join(", ")
 }
 
+*/
+
 pub async fn call_openai_for_point(
     cfg: &OpenAIConfig,
     screenshot_png: &[u8],
@@ -135,12 +138,25 @@ pub async fn call_openai_for_point(
         .unwrap_or(1)
         .max(1);
 
+    
+    //if samples == 1 {
+    //    let pt = call_openai_once(cfg, screenshot_png, user_prompt).await?;
+    //    if let Err(e) = save_dotmap_png(screenshot_png, &[pt], pt) {
+    //        eprintln!("(non-fatal) failed to write dot map: {e}");
+    //    }
+    //    return Ok(pt);
+    //}
+    let (my_x, my_y) = env_offset();
     if samples == 1 {
-        let pt = call_openai_once(cfg, screenshot_png, user_prompt).await?;
-        if let Err(e) = save_dotmap_png(screenshot_png, &[pt], pt) {
-            eprintln!("(non-fatal) failed to write dot map: {e}");
-        }
-        return Ok(pt);
+    	let raw = call_openai_once(cfg, screenshot_png, user_prompt).await?;
+    	let (x_off, y_off) = env_offset();
+    	let shifted = add_offset(raw, x_off, y_off);
+
+    	// dotmap and returned value both use shifted coords
+    	if let Err(e) = save_dotmap_png(screenshot_png, &[shifted], shifted) {
+        	eprintln!("(non-fatal) failed to write dot map: {e}");
+    	}
+    	return Ok(shifted);
     }
 
     let max_conc: usize = env::var("OPENAI_MAX_CONCURRENCY")
@@ -156,8 +172,8 @@ pub async fn call_openai_for_point(
         .unwrap_or(120);
 
     println!(
-        "🤖 Sampling OpenAI {} times (IQR-filtered mean combine, concurrency={}, stagger={}ms)...",
-        samples, max_conc, stagger_ms
+        "🤖 Sampling OpenAI {} times (IQR-filtered mean combine, concurrency={}, stagger={}ms, offset={},{})...",
+        samples, max_conc, stagger_ms, my_x, my_y
     );
 
     let mut set = JoinSet::new();
@@ -227,6 +243,18 @@ pub async fn call_openai_for_point(
     Ok(agg)
 }
 
+fn env_offset() -> (i32, i32) {
+    let x_off = std::env::var("CLICK_X_OFFSET_PX")
+        .ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let y_off = std::env::var("CLICK_Y_OFFSET_PX")
+        .ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+    (x_off, y_off)
+}
+
+fn add_offset(pt: ViewportPoint, x_off: i32, y_off: i32) -> ViewportPoint {
+    ViewportPoint { x: pt.x + x_off, y: pt.y + y_off, double: pt.double }
+}
+
 async fn call_openai_once(
     cfg: &OpenAIConfig,
     screenshot_png: &[u8],
@@ -249,6 +277,7 @@ async fn call_openai_once(
     let b64 = base64::engine::general_purpose::STANDARD.encode(&annotated_png);
     let data_url = format!("data:image/png;base64,{}", b64);
 
+    /*
     // NEW: build a prompt that lists prior points to avoid
     let radius_px: i32 = env::var("OPENAI_DEDUP_RADIUS")
         .ok().and_then(|s| s.parse().ok())
@@ -268,10 +297,11 @@ async fn call_openai_once(
             format_prev_points(&prev_snapshot)
         )
     };
+	
+  */
 
     let full_prompt = format!(
-        "{}{}\nReturn only JSON in the exact form {{\"x\":int,\"y\":int,\"double\":bool}}.",
-        used_coords_text,
+        "{}\nReturn only JSON in the exact form {{\"x\":int,\"y\":int,\"double\":bool}}.",
         user_prompt
     );
 
@@ -282,10 +312,7 @@ async fn call_openai_once(
                 "You are selecting a single click target on the image. \
                  Output ONLY JSON (no markdown fences, no prose) with keys x:int,y:int,double:bool. \
                  Coordinates are CSS/viewport pixels relative to the visible page (top-left). \
-                 If a list of previously selected points is provided, \
-                 choose a location at least ~{} px away from all of them. \
-                 If unsure, estimate.",
-                radius_px
+		 Be specific, do not estimate."
             )),
         },
         ChatMessage {
@@ -354,15 +381,10 @@ async fn call_openai_once(
                         .to_string();
 
                     let cleaned = strip_code_fences(&content);
-                    match serde_json::from_str::<ViewportPoint>(cleaned) {
-                        Ok(pt) => {
-                            // remember this point for future avoidance
-                            if let Ok(mut guard) = prev_points().lock() {
-                                guard.push(pt);
-                            }
-                            return Ok(pt);
-                        }
-                        Err(e) => {
+                    
+		    match serde_json::from_str::<ViewportPoint>(cleaned) {
+                        Ok(pt) => return Ok(pt),
+			Err(e) => {
                             last_err = Some(anyhow::anyhow!(
                                 "Failed to parse JSON from OpenAI: {}\nRaw content: {}",
                                 e,
