@@ -146,6 +146,8 @@ pub async fn call_openai_for_point(
     //    }
     //    return Ok(pt);
     //}
+    
+    /*
     let (my_x, my_y) = env_offset();
     if samples == 1 {
     	let raw = call_openai_once(cfg, screenshot_png, user_prompt).await?;
@@ -158,6 +160,7 @@ pub async fn call_openai_for_point(
     	}
     	return Ok(shifted);
     }
+    */
 
     let max_conc: usize = env::var("OPENAI_MAX_CONCURRENCY")
         .ok()
@@ -172,8 +175,8 @@ pub async fn call_openai_for_point(
         .unwrap_or(120);
 
     println!(
-        "🤖 Sampling OpenAI {} times (IQR-filtered mean combine, concurrency={}, stagger={}ms, offset={},{})...",
-        samples, max_conc, stagger_ms, my_x, my_y
+        "🤖 Sampling OpenAI {} times (IQR-filtered mean combine, concurrency={}, stagger={}ms...",
+        samples, max_conc, stagger_ms
     );
 
     let mut set = JoinSet::new();
@@ -243,6 +246,7 @@ pub async fn call_openai_for_point(
     Ok(agg)
 }
 
+/*
 fn env_offset() -> (i32, i32) {
     let x_off = std::env::var("CLICK_X_OFFSET_PX")
         .ok().and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -254,6 +258,8 @@ fn env_offset() -> (i32, i32) {
 fn add_offset(pt: ViewportPoint, x_off: i32, y_off: i32) -> ViewportPoint {
     ViewportPoint { x: pt.x + x_off, y: pt.y + y_off, double: pt.double }
 }
+
+*/
 
 async fn call_openai_once(
     cfg: &OpenAIConfig,
@@ -598,18 +604,29 @@ fn save_dotmap_png(
     let mut rgba: RgbaImage = image::load_from_memory(&base_png)?.to_rgba8();
     let (w, h) = rgba.dimensions();
 
+    let x_off = std::env::var("CLICK_X_OFFSET_PX")
+	.ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let y_off = std::env::var("CLICK_Y_OFFSET_PX")
+	.ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+
     let sample_color = Rgba([255, 0, 0, 200]);
     let agg_outline = Rgba([0, 0, 0, 255]);
     let agg_fill = Rgba([255, 255, 255, 255]);
 
     for p in samples {
-        let x = p.x.clamp(0, (w as i32) - 1);
-        let y = p.y.clamp(0, (h as i32) - 1);
+        let mut x = p.x.clamp(0, (w as i32) - 1);
+        let mut y = p.y.clamp(0, (h as i32) - 1);
+	x += x_off;
+	y += y_off;
         draw_filled_circle(&mut rgba, x, y, 4, sample_color);
     }
 
-    let ax = aggregate.x.clamp(0, (w as i32) - 1);
-    let ay = aggregate.y.clamp(0, (h as i32) - 1);
+    let mut ax = aggregate.x.clamp(0, (w as i32) - 1);
+    let mut ay = aggregate.y.clamp(0, (h as i32) - 1);
+
+    ax += x_off;
+    ay += y_off;    
+
     draw_filled_circle(&mut rgba, ax, ay, 8, agg_outline);
     draw_filled_circle(&mut rgba, ax, ay, 5, agg_fill);
 

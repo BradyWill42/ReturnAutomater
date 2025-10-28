@@ -49,5 +49,9 @@ pub fn viewport_to_screen(
     let x_screen = inputs.window_x + x_win;
     let y_screen = inputs.window_y + y_win;
  
-    (x_screen, y_screen)
+    let x_off = std::env::var("CLICK_X_OFFSET_PX").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let y_off = std::env::var("CLICK_Y_OFFSET_PX").ok().and_then(|s| s.parse().ok()).unwrap_or(0);   
+
+
+    (x_screen + x_off, y_screen + y_off)
 }
