@@ -250,7 +250,7 @@ async fn call_openai_once(
 
     let req_body = ChatRequest {
         model: &cfg.model,
-        temperature: 0.0,
+        temperature: 1.0,
         response_format: ResponseFormat::JsonObject,
         messages,
     };
@@ -272,10 +272,14 @@ async fn call_openai_once(
                 if !status.is_success() {
                     // Grab headers & body for rate-limit hints
                     let headers = r.headers().clone();
-                    
+			
+		    /*                    
+
 		    for (k, v) in &headers {
     			eprintln!("hdr {}: {:?}", k.as_str(), v);
 		    }
+
+		    */
 
 		    /*
 		    let h = |k: &str| headers.get(k).and_then(|v| v.to_str().ok()).unwrap_or("-");
