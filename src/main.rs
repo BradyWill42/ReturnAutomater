@@ -14,7 +14,7 @@ use mouse::{ensure_xdotool, reset_zoom, get_active_window_geometry, get_display_
 use coords::{png_dimensions, NormalizationInputs, viewport_to_screen};
 use plan::{AutomationPlan, Step};
 use tokio::time::{sleep, Duration};
-use keyboard::{type_text, xdotool_key};
+use keyboard::type_text;
  
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -110,8 +110,8 @@ async fn main() -> Result<()> {
  
                 // Finally clamp to display before clicking
                 let (dw, dh) = get_display_geometry(&display)?;
-                let mut sx = sx.clamp(0, dw.saturating_sub(1));
-                let mut sy = sy.clamp(0, dh.saturating_sub(1));
+                let sx = sx.clamp(0, dw.saturating_sub(1));
+                let sy = sy.clamp(0, dh.saturating_sub(1));
  
 		//let x_off = std::env::var("CLICK_X_OFFSET_PX").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
 		//let y_off = std::env::var("CLICK_Y_OFFSET_PX").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
