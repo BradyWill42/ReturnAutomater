@@ -108,24 +108,6 @@ pub struct ViewportPoint {
     pub double: bool,
 }
 
-/*
-
-
-static PREV_POINTS: OnceLock<Mutex<Vec<ViewportPoint>>> = OnceLock::new();
-
-fn prev_points() -> &'static Mutex<Vec<ViewportPoint>> {
-    PREV_POINTS.get_or_init(|| Mutex::new(Vec::new()))
-}
-
-fn format_prev_points(list: &[ViewportPoint]) -> String {
-    list.iter()
-        .map(|p| format!("({}, {})", p.x, p.y))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-*/
-
 pub async fn call_openai_for_point(
     cfg: &OpenAIConfig,
     screenshot_png: &[u8],
@@ -136,30 +118,6 @@ pub async fn call_openai_for_point(
         .and_then(|s| s.parse().ok())
         .unwrap_or(1)
         .max(1);
-
-    
-    //if samples == 1 {
-    //    let pt = call_openai_once(cfg, screenshot_png, user_prompt).await?;
-    //    if let Err(e) = save_dotmap_png(screenshot_png, &[pt], pt) {
-    //        eprintln!("(non-fatal) failed to write dot map: {e}");
-    //    }
-    //    return Ok(pt);
-    //}
-    
-    /*
-    let (my_x, my_y) = env_offset();
-    if samples == 1 {
-    	let raw = call_openai_once(cfg, screenshot_png, user_prompt).await?;
-    	let (x_off, y_off) = env_offset();
-    	let shifted = add_offset(raw, x_off, y_off);
-
-    	// dotmap and returned value both use shifted coords
-    	if let Err(e) = save_dotmap_png(screenshot_png, &[shifted], shifted) {
-        	eprintln!("(non-fatal) failed to write dot map: {e}");
-    	}
-    	return Ok(shifted);
-    }
-    */
 
     let max_conc: usize = env::var("OPENAI_MAX_CONCURRENCY")
         .ok()
@@ -245,21 +203,6 @@ pub async fn call_openai_for_point(
     Ok(agg)
 }
 
-/*
-fn env_offset() -> (i32, i32) {
-    let x_off = std::env::var("CLICK_X_OFFSET_PX")
-        .ok().and_then(|s| s.parse().ok()).unwrap_or(0);
-    let y_off = std::env::var("CLICK_Y_OFFSET_PX")
-        .ok().and_then(|s| s.parse().ok()).unwrap_or(0);
-    (x_off, y_off)
-}
-
-fn add_offset(pt: ViewportPoint, x_off: i32, y_off: i32) -> ViewportPoint {
-    ViewportPoint { x: pt.x + x_off, y: pt.y + y_off, double: pt.double }
-}
-
-*/
-
 async fn call_openai_once(
     cfg: &OpenAIConfig,
     screenshot_png: &[u8],
@@ -281,30 +224,6 @@ async fn call_openai_once(
 
     let b64 = base64::engine::general_purpose::STANDARD.encode(&annotated_png);
     let data_url = format!("data:image/png;base64,{}", b64);
-
-    /*
-    // NEW: build a prompt that lists prior points to avoid
-    let radius_px: i32 = env::var("OPENAI_DEDUP_RADIUS")
-        .ok().and_then(|s| s.parse().ok())
-        .unwrap_or(40);
-
-    let prev_snapshot: Vec<ViewportPoint> = {
-        let guard = prev_points().lock().unwrap();
-        guard.clone()
-    };
-
-    let used_coords_text = if prev_snapshot.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "Previously selected points (avoid selecting within ~{} px of any): [{}]\n",
-            radius_px,
-            format_prev_points(&prev_snapshot)
-        )
-    };
-	
-  */
-
     let full_prompt = format!(
         "{}\nReturn only JSON in the exact form {{\"x\":int,\"y\":int,\"double\":bool}}.",
         user_prompt
@@ -353,8 +272,30 @@ async fn call_openai_once(
                 if !status.is_success() {
                     // Grab headers & body for rate-limit hints
                     let headers = r.headers().clone();
-                    let text = r.text().await.unwrap_or_default();
+                    
+		    for (k, v) in &headers {
+    			eprintln!("hdr {}: {:?}", k.as_str(), v);
+		    }
 
+		    /*
+		    let h = |k: &str| headers.get(k).and_then(|v| v.to_str().ok()).unwrap_or("-");
+		    eprintln!(
+		    	"[rate] status={} req_id={} \
+		    	rpm_limit={} rpm_rem={} rpm_reset={} \
+		        tpm_limit={} tpm_rem={} tpm_reset={} retry_after={}",
+		        status.as_u16(),
+		        h("x-request-id"),
+		        h("x-ratelimit-limit-requests"),
+		        h("x-ratelimit-remaining-requests"),
+		        h("x-ratelimit-reset-requests"),
+		        h("x-ratelimit-limit-tokens"),
+		        h("x-ratelimit-remaining-tokens"),
+		        h("x-ratelimit-reset-tokens"),
+		        h("retry-after"),
+		    );
+		    */
+		    let text = r.text().await.unwrap_or_default();
+  		    
                     if status.as_u16() == 429 {
                         let wait_ms = compute_rate_limit_sleep_ms(&headers, &text, attempt);
                         eprintln!(
@@ -371,7 +312,7 @@ async fn call_openai_once(
                     // (optional) read limits for diagnostic
                     if let Some(v) = r.headers().get("x-ratelimit-limit-tokens") {
                         if let Ok(_s) = v.to_str() {
-                            // println!("(diag) TPM cap reported: {}", _s);
+                            println!("(diag) TPM cap reported: {}", _s);
                         }
                     }
 
