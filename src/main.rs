@@ -59,6 +59,7 @@ async fn main() -> Result<()> {
                 println!("⏳ Wait {}s", secs);
                 sleep(Duration::from_secs(*secs)).await;
             }
+	    /*
             Step::ClickScreen { x, y, double } => {
                 println!("🧭 Click screen at {},{} (double={})", x, y, double);
                 // Clamp to display bounds
@@ -69,6 +70,7 @@ async fn main() -> Result<()> {
 				
                 xdotool_move_and_click(&display, sx, sy, *double)?;
             }
+	    */
             Step::ClickByLlm { prompt, double } => {
                 let cfg = match &openai_cfg {
                     Some(c) => c,

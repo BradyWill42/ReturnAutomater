@@ -13,7 +13,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::task::JoinSet;
 
 // NEW: simple in-process memory of previously chosen points
-use std::sync::{Mutex, OnceLock};
 
 #[derive(Debug, Clone)]
 pub struct OpenAIConfig {
