@@ -82,9 +82,12 @@ pub async fn init_driver(login_url: &str) -> Result<DriverBundle> {
     caps.add_arg("--disable-dev-shm-usage")?;
     caps.add_arg("--no-default-browser-check")?;
     caps.add_arg("--no-first-run")?;
-	
-    //caps.add_arg("--kiosk")?;
- 
+    caps.add_arg("--disable-infobars")?;	
+    caps.add_arg("--kiosk")?;
+    
+    caps.add_experimental_option("excludeSwitches", vec!["enable-automation"])?;
+    caps.add_experimental_option("useAutomationExtension", false)?;
+
     let driver_url = format!("http://127.0.0.1:{driver_port}");
     let driver = WebDriver::new(&driver_url, caps).await?;
     
