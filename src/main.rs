@@ -6,6 +6,7 @@ mod driver;
 mod plan;
 mod overlay;
 mod keyboard;
+mod creds;
  
 use anyhow::{Context, Result};
 use openai_client::{OpenAIConfig, ViewportPoint, call_openai_for_point};
@@ -15,11 +16,34 @@ use coords::{png_dimensions, NormalizationInputs, viewport_to_screen};
 use plan::{AutomationPlan, Step};
 use tokio::time::{sleep, Duration};
 use keyboard::type_text;
- 
+use creds::KeeperCreds;
+
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let _ = dotenvy::dotenv();
- 
+    
+    let token = std::env::var("KEEPER_TOKEN")?;
+    let uid = std::env::var("KEEPER_UID")?;
+    let cfg_path = std::env::var("KEEPER_CONFIG_PATH").unwrap_or_else(|_| "config.json".to_string());
+
+    // Run Keeper (blocking) on a blocking thread so Tokio won't panic.
+    let (username, password, totp) = tokio::task::spawn_blocking(move || -> Result<_> {
+        let mut kc = KeeperCreds::new(&token, &cfg_path)?;
+        // Optional full dump first (comment out if you don't want it every run)
+        //kc.dump_record(&uid)?;
+        // Then fetch the standard fields (login/password/oneTimeCode)
+        kc.get_fields(&uid)
+    })
+    .await??;
+
+    println!("Username: {}", username);
+    println!("Password: {}", password);
+    match totp {
+        Some(code) => println!("2FA Code: {}", code),
+        None => println!("No TOTP configured."),
+    }
+
     ensure_xdotool()?;
  
     let login_url = std::env::var("LOGIN_URL")

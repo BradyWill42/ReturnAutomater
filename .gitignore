@@ -1,7 +1,9 @@
 <<<<<<< HEAD
 /target
 src/plan.rs
+src/creds.rs
 /.env
+/config.json
 /.venv
 /screenshot*
 /runs
