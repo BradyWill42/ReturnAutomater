@@ -23,6 +23,7 @@ use creds::KeeperCreds;
 async fn main() -> Result<()> {
     let _ = dotenvy::dotenv();
     
+    /*
     let token = std::env::var("KEEPER_TOKEN")?;
     let uid = std::env::var("KEEPER_UID")?;
     let cfg_path = std::env::var("KEEPER_CONFIG_PATH").unwrap_or_else(|_| "config.json".to_string());
@@ -43,6 +44,7 @@ async fn main() -> Result<()> {
         Some(code) => println!("2FA Code: {}", code),
         None => println!("No TOTP configured."),
     }
+    */
 
     ensure_xdotool()?;
  
