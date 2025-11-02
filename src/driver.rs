@@ -90,30 +90,7 @@ pub async fn init_driver(login_url: &str) -> Result<DriverBundle> {
 
     let driver_url = format!("http://127.0.0.1:{driver_port}");
     let driver = WebDriver::new(&driver_url, caps).await?;
-    
-	
-    
-
-    //DEBUGGING
-    /*
-    let rect = driver.get_window_rect().await?;
-    println!(
-	"OUTER RECT: x={}, y={}, width={}, height={}",
- 	rect.x, rect.y, rect.width, rect.height
-    );    
-	
-    let inner_w: i32 = driver.execute("return window.innerWidth;", vec![]).await?
-    	.json().as_f64().unwrap_or(0.0).round() as i32;
-
-    let inner_h: i32 = driver.execute("return window.innerHeight;", vec![]).await?
-    	.json().as_f64().unwrap_or(0.0).round() as i32;
-    
-    println!("viewport (inner): {}x{}", inner_w, inner_h);
-    */
-
-
-    //driver.goto(login_url).await?;
- 
+   
     Ok(DriverBundle {
         driver,
         chromedriver_child: chromedriver,

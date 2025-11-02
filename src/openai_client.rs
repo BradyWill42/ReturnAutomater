@@ -273,31 +273,6 @@ async fn call_openai_once(
                     // Grab headers & body for rate-limit hints
                     let headers = r.headers().clone();
 			
-		    /*                    
-
-		    for (k, v) in &headers {
-    			eprintln!("hdr {}: {:?}", k.as_str(), v);
-		    }
-
-		    */
-
-		    /*
-		    let h = |k: &str| headers.get(k).and_then(|v| v.to_str().ok()).unwrap_or("-");
-		    eprintln!(
-		    	"[rate] status={} req_id={} \
-		    	rpm_limit={} rpm_rem={} rpm_reset={} \
-		        tpm_limit={} tpm_rem={} tpm_reset={} retry_after={}",
-		        status.as_u16(),
-		        h("x-request-id"),
-		        h("x-ratelimit-limit-requests"),
-		        h("x-ratelimit-remaining-requests"),
-		        h("x-ratelimit-reset-requests"),
-		        h("x-ratelimit-limit-tokens"),
-		        h("x-ratelimit-remaining-tokens"),
-		        h("x-ratelimit-reset-tokens"),
-		        h("retry-after"),
-		    );
-		    */
 		    let text = r.text().await.unwrap_or_default();
   		    
                     if status.as_u16() == 429 {
