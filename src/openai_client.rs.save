@@ -1,8 +1,6 @@
 use anyhow::{Context, Result};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
-use thirtyfour::prelude::*;
 use std::env;
 use std::time::Duration;
 use crate::overlay::{overlay_grid_with_coords, GridOptions};
@@ -13,7 +11,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::task::JoinSet;
-
 
 // NEW: simple in-process memory of previously chosen points
 
@@ -111,10 +108,15 @@ pub struct ViewportPoint {
     pub double: bool,
 }
 
-//TODO NEW UI CLICK FUNCTIONALITY ADDENDEUM
+
+
+
+
+
+//TODO Highlighted for readability
 
 #[derive(Debug, Clone, Serialize)]
-pub struct UiCandidate {
+struct UiCandidate {
     id: usize,        // index in the vector
     tag: String,      // e.g., "BUTTON", "A"
     text: String,     // visible text (trimmed)
@@ -122,218 +124,15 @@ pub struct UiCandidate {
 }
 
 #[derive(Debug, Clone)]
-pub struct Candidate {
+struct Candidate {
     meta: UiCandidate,
     el: WebElement,   // the actual element to click
 }
 
-#[derive(Debug, Deserialize)]
-struct ClickDecision {
-    id: Option<usize>,       // index into candidates
-    reason: Option<String>,  // optional explanation
-}
-
-pub async fn collect_ui_candidates(driver: &WebDriver, cap: usize) -> Result<Vec<Candidate>> {
-    // Reasonable set of likely-clickable elements.
-    let selectors = [
-        "button",
-        "a[href]",
-        "[role='button']",
-        "[role='link']",
-        "input[type='submit']",
-        "input[type='button']",
-        "[tabindex]",
-        ".btn",
-        ".button",
-    ].join(",");
-
-    let elems = driver.find_all(By::Css(&selectors)).await?;
-    let mut out = Vec::with_capacity(elems.len().min(cap));
-
-    for (i, el) in elems.into_iter().enumerate().take(cap) {
-        let tag = el.tag_name().await.unwrap_or_default();
-        // NOTE: `text()` uses the element’s visible text
-        let mut text = el.text().await.unwrap_or_default();
-        println!("Cur line: {text}");
-	if text.len() > 140 { text.truncate(140); }
-        let aria = el.attr("aria-label").await?.unwrap_or_default();
-
-        out.push(Candidate {
-            meta: UiCandidate {
-                id: i,
-                tag: tag.to_uppercase(),
-                text: text.trim().to_string(),
-                aria: aria.trim().to_string(),
-            },
-            el,
-        });
-    }
-    Ok(out)
-}
-
-pub async fn call_openai_for_dom_decision(
-    cfg: &OpenAIConfig,
-    user_prompt: &str,
-    candidates: &[UiCandidate],
-) -> Result<ClickDecision> {
-    let client = reqwest::Client::builder().timeout(cfg.timeout).build()?;
-
-    // System/user messages: plain text, JSON output enforced.
-    let system = ChatMessage {
-        role: "system",
-        content: ChatContent::Text(
-            "You are a UI clicking assistant. Choose exactly one candidate that best \
-             matches the user's intent. Respond ONLY JSON: \
-             {\"id\": <number>, \"reason\": \"...\"}"
-                .to_string(),
-        ),
-    };
-
-    let user = ChatMessage {
-        role: "user",
-        content: ChatContent::Text(format!(
-            "Task: {}\n\nCandidates:\n{}\n\nReturn only JSON with fields id and reason.",
-            user_prompt,
-            serde_json::to_string_pretty(candidates)?
-        )),
-    };
-
-    let req_body = ChatRequest {
-        model: &cfg.model,
-        temperature: 1.0,
-        response_format: ResponseFormat::JsonObject,
-        messages: vec![system, user],
-    };
-
-    let url = format!("{}/chat/completions", cfg.base_url);
-    let mut last_err: Option<anyhow::Error> = None;
-
-    for attempt in 0..cfg.max_retries {
-        let resp = client
-            .post(&url)
-            .bearer_auth(&cfg.api_key)
-            .json(&req_body)
-            .send()
-            .await;
-
-        match resp {
-            Ok(r) => {
-                let status = r.status();
-                if !status.is_success() {
-                    let headers = r.headers().clone();
-                    let text = r.text().await.unwrap_or_default();
-                    if status.as_u16() == 429 {
-                        let wait_ms = compute_rate_limit_sleep_ms(&headers, &text, attempt);
-                        eprintln!(
-                            "⏳ 429 rate-limited (attempt {}/{}). Sleeping ~{} ms",
-                            attempt + 1,
-                            cfg.max_retries,
-                            wait_ms
-                        );
-                        tokio::time::sleep(Duration::from_millis(wait_ms)).await;
-                        continue;
-                    }
-                    last_err = Some(anyhow::anyhow!("OpenAI HTTP {}: {}", status, text));
-                } else {
-                    let parsed: ChatResponse = r.json().await?;
-                    let content = parsed
-                        .choices
-                        .get(0)
-                        .ok_or_else(|| anyhow::anyhow!("No choices from OpenAI"))?
-                        .message
-                        .content
-                        .trim()
-                        .to_string();
-
-                    let cleaned = strip_code_fences(&content);
-                    match serde_json::from_str::<ClickDecision>(cleaned) {
-                        Ok(d) => return Ok(d),
-                        Err(e) => {
-                            last_err = Some(anyhow::anyhow!(
-                                "Failed to parse click decision: {}\nRaw: {}",
-                                e,
-                                content
-                            ));
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                last_err = Some(anyhow::anyhow!(e));
-            }
-        }
-
-        if attempt + 1 < cfg.max_retries {
-            tokio::time::sleep(Duration::from_millis(400 * (attempt as u64 + 1))).await;
-        }
-    }
-
-    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("OpenAI decision request failed")))
-}
 
 
 
-pub async fn click_by_llm_dom_first(
-    driver: &WebDriver,
-    cfg: &OpenAIConfig,
-    user_prompt: &str,
-    force_double: Option<bool>,
-) -> Result<()> {
-    let cands = collect_ui_candidates(driver, 200).await?;
-    if cands.is_empty() {
-        anyhow::bail!("No clickable candidates found on page");
-    }
 
-    // Ask model to choose an index
-    let decision = call_openai_for_dom_decision(cfg, user_prompt, &cands.iter().map(|c| c.meta.clone()).collect::<Vec<_>>()).await;
-
-    // Resolve index
-    let idx = match decision {
-        Ok(d) => {
-	    println!(
-		"[click_by_llm_dom_first] decision: id={:?}, reason={:?}",
-		d.id, d.reason
-	    );
-            if let Some(i) = d.id {
-                i.min(cands.len() - 1)
-            } else {
-                // fallback: pick first candidate whose text/aria matches a word from prompt
-                let p = user_prompt.to_lowercase();
-                cands.iter()
-                    .position(|c| {
-                        let t = c.meta.text.to_lowercase();
-                        let a = c.meta.aria.to_lowercase();
-                        p.split_whitespace().any(|w| w.len() >= 3 && (t.contains(w) || a.contains(w)))
-                    })
-                    .unwrap_or(0)
-            }
-        }
-        Err(e) => {
-            eprintln!("LLM decision failed, using heuristic fallback: {e}");
-            let p = user_prompt.to_lowercase();
-            cands.iter()
-                .position(|c| {
-                    let t = c.meta.text.to_lowercase();
-                    let a = c.meta.aria.to_lowercase();
-                    p.split_whitespace().any(|w| w.len() >= 3 && (t.contains(w) || a.contains(w)))
-                })
-                .unwrap_or(0)
-        }
-    };
-
-    let el = &cands[idx].el;
-
-    // Try to click (double if requested)
-    if force_double.unwrap_or(false) {
-        el.click().await?;
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        el.click().await?;
-    } else {
-        el.click().await?;
-    }
-
-    Ok(())
-}
 
 
 pub async fn call_openai_for_point(
