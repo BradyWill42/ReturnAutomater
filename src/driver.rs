@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thirtyfour::prelude::*;
-use serde_json::Value;
+use serde_json::{Value, json};
 use which::which;
  
 pub struct DriverBundle {
@@ -84,9 +84,19 @@ pub async fn init_driver(login_url: &str) -> Result<DriverBundle> {
     caps.add_arg("--no-first-run")?;
     caps.add_arg("--disable-infobars")?;	
     caps.add_arg("--kiosk")?;
+    caps.add_arg("--disable-save-password-bubble")?;
+    caps.add_arg("--disable-autofill")?;
+    caps.add_arg("--disable-features=AutofillSaveCardBubble,PasswordManagerOnboarding")?;    
     
+
     caps.add_experimental_option("excludeSwitches", vec!["enable-automation"])?;
     caps.add_experimental_option("useAutomationExtension", false)?;
+    caps.add_experimental_option("prefs", json!({
+        "credentials_enable_service": false,
+        "profile.password_manager_enabled": false,
+        "autofill.profile_enabled": false,
+        "autofill.credit_card_enabled": false
+    }))?;
 
     let driver_url = format!("http://127.0.0.1:{driver_port}");
     let driver = WebDriver::new(&driver_url, caps).await?;

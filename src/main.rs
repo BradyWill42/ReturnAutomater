@@ -13,7 +13,7 @@ use openai_client::{OpenAIConfig, ViewportPoint, call_openai_for_point};
 use driver::{init_driver, cleanup_driver, screenshot_bytes};
 use mouse::{ensure_xdotool, reset_zoom, get_active_window_geometry, get_display_geometry, xdotool_move_and_click};
 use coords::{png_dimensions, NormalizationInputs, viewport_to_screen};
-use plan::{AutomationPlan, Step};
+use plan::{AutomationPlan, Step, fetch_keeper_creds_sync};
 use tokio::time::{sleep, Duration};
 use keyboard::type_text;
 use creds::KeeperCreds;
@@ -53,6 +53,23 @@ async fn main() -> Result<()> {
 	    Step::TypeKey { key } => {
 		println!("Pressing key: {key}");
 		keyboard::xdotool_key(&display, key)?;
+	    }
+	    Step::TypeOTP { uid } => {
+		let (_, _, code) = match fetch_keeper_creds_sync() {
+        	    Ok(v) => v,
+        	    Err(e) => {
+            	    	eprintln!("Keeper could not fetch credentials: {e}");
+            		(String::new(), String::new(), None)
+        	    }
+		};
+
+		if let Some(otp) = code {
+		    ensure_xdotool()?;
+		    type_text(&display, &otp, 150)?;	
+		    println!("Typing OTP for UID: {uid}");
+	    	} else {
+		    eprintln!("No OTP found for UID: {uid}");
+		}
 	    }
             Step::ResetZoom => {
                 println!("🔎 Reset zoom → 100%");
