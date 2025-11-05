@@ -34,8 +34,8 @@ pub fn overlay_grid_with_coords(png_bytes: &[u8], opts: GridOptions) -> Result<V
     let mut rgba: RgbaImage = img.to_rgba8();
     let (w, h) = rgba.dimensions();
  
-    let grid = Rgba([255, 0, 0, 0]);   // green lines
-    let text = Rgba([255, 0, 0, 0]); // yellow text
+    let grid = Rgba([255, 0, 0, 255]);   // green lines
+    let text = Rgba([255, 0, 0, 255]); // yellow text
     let pad = 2 * opts.font_scale;       // small padding for labels
  
     // Draw vertical lines and x-labels

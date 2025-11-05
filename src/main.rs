@@ -17,7 +17,7 @@ use plan::{AutomationPlan, Step, fetch_keeper_creds_sync};
 use tokio::time::{sleep, Duration};
 use keyboard::type_text;
 use creds::KeeperCreds;
-
+use thirtyfour::By;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -79,6 +79,13 @@ async fn main() -> Result<()> {
                 println!("⏳ Wait {}s", secs);
                 sleep(Duration::from_secs(*secs)).await;
             }
+	    Step::SubmitForm => {
+		if let Ok(el) = bundle.driver.find(By::Css("button[type='submit']")).await {
+		    el.click().await?;
+		    continue;
+		}
+		return Err(anyhow::anyhow!("No submit button found"));
+	    }
 	    Step::ClickByDom { prompt, double } => {
 		let cfg = match &openai_cfg {
                     Some(c) => c,
