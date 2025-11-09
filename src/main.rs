@@ -8,6 +8,9 @@ mod overlay;
 mod keyboard;
 mod creds;
 mod client;
+mod sheets;
+
+
 
  
 use anyhow::{Context, Result};
@@ -20,6 +23,8 @@ use tokio::time::{sleep, Duration};
 use keyboard::type_text;
 use creds::KeeperCreds;
 use thirtyfour::By;
+use sheets::{fetch_sheet_values};
+
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -34,8 +39,10 @@ async fn main() -> Result<()> {
     let mut bundle = init_driver(&login_url).await?;
     let display = bundle.display.clone();
  
+    let values = fetch_sheet_values().await?;
+
     // Define your automation plan (replace demo() with your own steps)
-    let plan = AutomationPlan::client_loop();
+    let plan = AutomationPlan::client_loop(&values)?;
  
     // OpenAI is only needed for ClickByLlm steps
     let openai_cfg = OpenAIConfig::from_env().ok();
