@@ -7,6 +7,8 @@ mod plan;
 mod overlay;
 mod keyboard;
 mod creds;
+mod client;
+
  
 use anyhow::{Context, Result};
 use openai_client::{OpenAIConfig, ViewportPoint, call_openai_for_point, click_by_llm_dom_first};
@@ -33,7 +35,7 @@ async fn main() -> Result<()> {
     let display = bundle.display.clone();
  
     // Define your automation plan (replace demo() with your own steps)
-    let plan = AutomationPlan::demo();
+    let plan = AutomationPlan::client_loop();
  
     // OpenAI is only needed for ClickByLlm steps
     let openai_cfg = OpenAIConfig::from_env().ok();
