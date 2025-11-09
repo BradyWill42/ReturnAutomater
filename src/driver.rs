@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thirtyfour::prelude::*;
-use serde_json::{Value, json};
+use serde_json::json;
 use which::which;
  
 pub struct DriverBundle {

@@ -21,7 +21,6 @@ use coords::{png_dimensions, NormalizationInputs, viewport_to_screen};
 use plan::{AutomationPlan, Step, fetch_keeper_creds_sync};
 use tokio::time::{sleep, Duration};
 use keyboard::type_text;
-use creds::KeeperCreds;
 use thirtyfour::By;
 use sheets::{fetch_sheet_values};
 

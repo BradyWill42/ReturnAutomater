@@ -1,7 +1,6 @@
 use anyhow::{Context, Result};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use thirtyfour::prelude::*;
 use std::env;
 use std::time::Duration;
