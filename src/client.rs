@@ -35,6 +35,21 @@ impl Client {
         let post = std::env::var("USER_PORTAL_B").unwrap_or_default();
         format!("{base}{}{post}", self.client_id)
     }
+
+    pub fn email_template(&self) -> Vec<String> {
+ 	let mut templates = Vec::new();
+
+	if !self.email_temp1.trim().is_empty() {
+	    templates.push(self.email_temp1.trim().to_string());
+	}	
+
+	if !self.email_temp2.trim().is_empty() {
+	    templates.push(self.email_temp2.trim().to_string());
+	}
+	
+	templates
+    }
+
 }
 
 /// In-memory store of all clients for the current run.
