@@ -36,6 +36,12 @@ impl Client {
         format!("{base}{}{post}", self.client_id)
     }
 
+    pub fn docs_url(&self) -> String {
+	let base = std::env::var("USER_PORTAL_A").unwrap_or_default();
+	let post = std::env::var("DOCS_PORTAL").unwrap_or_default();
+	format!("{base}{}{post}", self.client_id)
+    }
+    
     pub fn email_template(&self) -> Vec<String> {
  	let mut templates = Vec::new();
 
@@ -49,7 +55,15 @@ impl Client {
 	
 	templates
     }
-
+    
+    pub fn est_qtr(&self) -> Vec<String> {
+	let mut estimates = Vec::new();
+	
+	if !self.estimate_quarterlies.trim().is_empty() {
+	    estimates.push(self.estimate_quarterlies.trim().to_string());
+   	}
+	estimates
+    }
 }
 
 /// In-memory store of all clients for the current run.
@@ -63,6 +77,7 @@ impl ClientStore {
     pub fn new() -> Self {
         Self { clients: Vec::new() }
     }
+
 
     /// Clear and repopulate from a Google Sheets `values` matrix.
     ///

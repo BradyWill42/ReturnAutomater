@@ -10,8 +10,6 @@ mod creds;
 mod client;
 mod sheets;
 
-
-
  
 use anyhow::{Context, Result};
 use openai_client::{OpenAIConfig, ViewportPoint, call_openai_for_point, click_by_llm_dom_first};
