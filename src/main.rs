@@ -10,9 +10,8 @@ mod creds;
 mod client;
 mod sheets;
 
- 
 use anyhow::{Context, Result};
-use openai_client::{OpenAIConfig, ViewportPoint, call_openai_for_point, click_by_llm_dom_first};
+use openai_client::{OpenAIConfig, ViewportPoint, call_openai_for_point, click_by_llm_dom_first, click_checkbox_for_row, click_options_menu_for_row};
 use driver::{init_driver, cleanup_driver, screenshot_bytes};
 use mouse::{ensure_xdotool, reset_zoom, get_active_window_geometry, get_display_geometry, xdotool_move_and_click};
 use coords::{png_dimensions, NormalizationInputs, viewport_to_screen};
@@ -92,6 +91,13 @@ async fn main() -> Result<()> {
 		}
 		return Err(anyhow::anyhow!("No submit button found"));
 	    }
+	    Step::ClickCheckbox { name } => {
+		click_checkbox_for_row(&bundle.driver, &name).await?;
+	    }
+	    Step::ClickOptionsMenu { name } => {
+		println!("Clicking options menu containing name: {name}");
+		click_options_menu_for_row(&bundle.driver, &name).await?;
+	    }
 	    Step::ClickByDom { prompt, double } => {
 		let cfg = match &openai_cfg {
                     Some(c) => c,
@@ -102,7 +108,6 @@ async fn main() -> Result<()> {
                 };
 		click_by_llm_dom_first(&bundle.driver, &cfg, prompt, *double).await?;
 	    }
-
             Step::ClickByLlm { prompt, double } => {
                 let cfg = match &openai_cfg {
                     Some(c) => c,

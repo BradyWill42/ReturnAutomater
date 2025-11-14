@@ -24,7 +24,7 @@ pub struct Client {
     pub closer: String,               // "Closer"
     pub pipeline: String,             // "Pipeline"
     pub seal: String,                 // "Seal"
-    pub year_to_seal: Option<i32>,    // "YearToSeal"
+    pub year_to_seal: String,    // "YearToSeal"
 }
 
 impl Client {
@@ -157,7 +157,7 @@ impl ClientStore {
                 closer: get_cell(row, c_closer),
                 pipeline: get_cell(row, c_pipeline),
                 seal: get_cell(row, c_seal),
-                year_to_seal: parse_i32_opt(&get_cell(row, c_year_to_seal)),
+                year_to_seal: get_cell(row, c_year_to_seal),
             };
 
             store.clients.push(client);

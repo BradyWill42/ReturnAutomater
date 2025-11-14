@@ -111,234 +111,6 @@ pub struct ViewportPoint {
 }
 
 //TODO NEW UI CLICK FUNCTIONALITY ADDENDEUM
-
-/*
-
-#[derive(Debug, Clone, Serialize)]
-pub struct UiCandidate {
-    id: usize,        // index in the vector
-    tag: String,      // e.g., "BUTTON", "A"
-    text: String,     // visible text (trimmed)
-    aria: String,     // aria-label (if any)
-}
-
-#[derive(Debug, Clone)]
-pub struct Candidate {
-    meta: UiCandidate,
-    el: WebElement,   // the actual element to click
-}
-
-#[derive(Debug, Deserialize)]
-struct ClickDecision {
-    id: Option<usize>,       // index into candidates
-    reason: Option<String>,  // optional explanation
-    confidence: Option<String>,
-}
-
-pub async fn collect_ui_candidates(driver: &WebDriver, cap: usize) -> Result<Vec<Candidate>> {
-    // Reasonable set of likely-clickable elements.
-    let selectors = [
-        "button",
-        "a[href]",
-        "[role='button']",
-        "[role='link']",
-        "input[type='submit']",
-        "input[type='button']",
-        "[tabindex]",
-        ".btn",
-        ".button",
-    ].join(",");
-
-    let elems = driver.find_all(By::Css(&selectors)).await?;
-    let mut out = Vec::with_capacity(elems.len().min(cap));
-
-    for (i, el) in elems.into_iter().enumerate().take(cap) {
-        let tag = el.tag_name().await.unwrap_or_default();
-        // NOTE: `text()` uses the element’s visible text
-        let mut text = el.text().await.unwrap_or_default();
-        println!("Cur line: {text}");
-	if text.len() > 140 { text.truncate(140); }
-        let aria = el.attr("aria-label").await?.unwrap_or_default();
-
-        out.push(Candidate {
-            meta: UiCandidate {
-                id: i,
-                tag: tag.to_uppercase(),
-                text: text.trim().to_string(),
-                aria: aria.trim().to_string(),
-            },
-            el,
-        });
-    }
-    Ok(out)
-}
-
-pub async fn call_openai_for_dom_decision(
-    cfg: &OpenAIConfig,
-    user_prompt: &str,
-    candidates: &[UiCandidate],
-) -> Result<ClickDecision> {
-    let client = reqwest::Client::builder().timeout(cfg.timeout).build()?;
-
-    // System/user messages: plain text, JSON output enforced.
-    let system = ChatMessage {
-        role: "system",
-        content: ChatContent::Text(
-            "You are a UI clicking assistant. Choose exactly one candidate that best \
-             matches the user's intent. Respond ONLY JSON: \
-             {\"id\": <number>, \"reason\": \"...\", \"confidence\":<0..1>}"
-                .to_string(),
-        ),
-    };
-
-    let user = ChatMessage {
-        role: "user",
-        content: ChatContent::Text(format!(
-            "Task: {}\n\nCandidates:\n{}\n\nReturn only JSON with fields id, reason, and confidence.",
-            user_prompt,
-            serde_json::to_string_pretty(candidates)?
-        )),
-    };
-
-    let req_body = ChatRequest {
-        model: &cfg.model,
-        temperature: 1.0,
-        response_format: ResponseFormat::JsonObject,
-        messages: vec![system, user],
-    };
-
-    let url = format!("{}/chat/completions", cfg.base_url);
-    let mut last_err: Option<anyhow::Error> = None;
-
-    for attempt in 0..cfg.max_retries {
-        let resp = client
-            .post(&url)
-            .bearer_auth(&cfg.api_key)
-            .json(&req_body)
-            .send()
-            .await;
-
-        match resp {
-            Ok(r) => {
-                let status = r.status();
-                if !status.is_success() {
-                    let headers = r.headers().clone();
-                    let text = r.text().await.unwrap_or_default();
-                    if status.as_u16() == 429 {
-                        let wait_ms = compute_rate_limit_sleep_ms(&headers, &text, attempt);
-                        eprintln!(
-                            "⏳ 429 rate-limited (attempt {}/{}). Sleeping ~{} ms",
-                            attempt + 1,
-                            cfg.max_retries,
-                            wait_ms
-                        );
-                        tokio::time::sleep(Duration::from_millis(wait_ms)).await;
-                        continue;
-                    }
-                    last_err = Some(anyhow::anyhow!("OpenAI HTTP {}: {}", status, text));
-                } else {
-                    let parsed: ChatResponse = r.json().await?;
-                    let content = parsed
-                        .choices
-                        .get(0)
-                        .ok_or_else(|| anyhow::anyhow!("No choices from OpenAI"))?
-                        .message
-                        .content
-                        .trim()
-                        .to_string();
-
-                    let cleaned = strip_code_fences(&content);
-                    match serde_json::from_str::<ClickDecision>(cleaned) {
-                        Ok(d) => return Ok(d),
-                        Err(e) => {
-                            last_err = Some(anyhow::anyhow!(
-                                "Failed to parse click decision: {}\nRaw: {}",
-                                e,
-                                content
-                            ));
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                last_err = Some(anyhow::anyhow!(e));
-            }
-        }
-
-        if attempt + 1 < cfg.max_retries {
-            tokio::time::sleep(Duration::from_millis(400 * (attempt as u64 + 1))).await;
-        }
-    }
-
-    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("OpenAI decision request failed")))
-}
-
-
-
-pub async fn click_by_llm_dom_first(
-    driver: &WebDriver,
-    cfg: &OpenAIConfig,
-    user_prompt: &str,
-    force_double: Option<bool>,
-) -> Result<()> {
-    let cands = collect_ui_candidates(driver, 200).await?;
-    if cands.is_empty() {
-        anyhow::bail!("No clickable candidates found on page");
-    }
-
-    // Ask model to choose an index
-    let decision = call_openai_for_dom_decision(cfg, user_prompt, &cands.iter().map(|c| c.meta.clone()).collect::<Vec<_>>()).await;
-
-    // Resolve index
-    let idx = match decision {
-        Ok(d) => {
-	    println!(
-		"[click_by_llm_dom_first] decision: id={:?}, reason={:?}, confidence={:?}",
-		d.id, d.reason, d.confidence
-	    );
-            if let Some(i) = d.id {
-                i.min(cands.len() - 1)
-            } else {
-                // fallback: pick first candidate whose text/aria matches a word from prompt
-                let p = user_prompt.to_lowercase();
-                cands.iter()
-                    .position(|c| {
-                        let t = c.meta.text.to_lowercase();
-                        let a = c.meta.aria.to_lowercase();
-                        p.split_whitespace().any(|w| w.len() >= 3 && (t.contains(w) || a.contains(w)))
-                    })
-                    .unwrap_or(0)
-            }
-        }
-        Err(e) => {
-            eprintln!("LLM decision failed, using heuristic fallback: {e}");
-            let p = user_prompt.to_lowercase();
-            cands.iter()
-                .position(|c| {
-                    let t = c.meta.text.to_lowercase();
-                    let a = c.meta.aria.to_lowercase();
-                    p.split_whitespace().any(|w| w.len() >= 3 && (t.contains(w) || a.contains(w)))
-                })
-                .unwrap_or(0)
-        }
-    };
-
-    let el = &cands[idx].el;
-
-    // Try to click (double if requested)
-    if force_double.unwrap_or(false) {
-        el.click().await?;
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        el.click().await?;
-    } else {
-        el.click().await?;
-    }
-
-    Ok(())
-}
-
-*/
-
 // =====================
 // DOM click refinements
 // =====================
@@ -462,6 +234,70 @@ pub async fn collect_ui_candidates(driver: &WebDriver, cap: usize) -> Result<Vec
     }
     Ok(out)
 }
+
+pub async fn click_checkbox_for_row(driver: &WebDriver, name: &str) -> Result<()> {
+    let rows = driver
+        .find_all(By::Css("[data-test='shared-section__docdir-table-row']"))
+        .await?;
+
+    for row in rows {
+        let text = row.text().await?;
+
+        if text.contains(name) {
+            let checkbox = row
+                .find(By::Css("label.checkbox[data-test='shared-section__checkbox']"))
+                .await?;
+
+            checkbox.click().await?;
+            println!("✔ Clicked checkbox for row: {}", name);
+            return Ok(());
+        }
+    }
+
+    Err(anyhow::anyhow!(
+	"Could not find document row with name containing: {}",
+	name
+    ))
+}
+
+pub async fn click_options_menu_for_row(driver: &WebDriver, name: &str) -> Result<()> {
+    // All document rows in the directory table
+    let rows = driver
+        .find_all(By::Css("[data-test='shared-section__docdir-table-row']"))
+        .await?;
+
+    for row in rows {
+        // Try to get the directory name text (e.g., "2024")
+        let label_el = row
+            .find(By::Css("[data-test='document-tree-node-link'] .truncate span"))
+            .await;
+
+        let mut matches = false;
+        if let Ok(el) = label_el {
+            if let Ok(txt) = el.text().await {
+                let txt_trim = txt.trim();
+                if !txt_trim.is_empty() && txt_trim.contains(name) {
+                    matches = true;
+                }
+            }
+        }
+
+        if matches {
+            // Inside that row, click the options ("vertical dots") button
+            if let Ok(btn) = row.find(By::Css("button[data-test='option-vertical']")).await {
+                btn.click().await?;
+                println!("Clicked options menu for row: {}", name);
+                return Ok(());
+            }
+        }
+    }
+
+    Err(anyhow::anyhow!(
+        "Could not find options menu for document row containing name: {}",
+        name
+    ))
+}
+
 
 pub async fn call_openai_for_dom_decision(
     cfg: &OpenAIConfig,
