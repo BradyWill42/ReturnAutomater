@@ -172,11 +172,13 @@ pub async fn collect_ui_candidates(driver: &WebDriver, cap: usize) -> Result<Vec
         "button",
         "a[href]",
         "[role='button']",
-        "input[type='submit']",
+        "[role='link']",
+	"input[type='submit']",
         "input[type='button']",
         "[tabindex]",
         ".btn",
         ".button",
+	"[data-test='document-tree-node-link']",
     ]
     .join(",");
 
@@ -261,33 +263,44 @@ pub async fn click_checkbox_for_row(driver: &WebDriver, name: &str) -> Result<()
 }
 
 pub async fn click_options_menu_for_row(driver: &WebDriver, name: &str) -> Result<()> {
-    // All document rows in the directory table
+    let name_lc = name.to_lowercase();
+
+    // All rows in the document directory table
     let rows = driver
         .find_all(By::Css("[data-test='shared-section__docdir-table-row']"))
         .await?;
 
-    for row in rows {
-        // Try to get the directory name text (e.g., "2024")
-        let label_el = row
-            .find(By::Css("[data-test='document-tree-node-link'] .truncate span"))
-            .await;
+    println!(
+        "[click_options_menu_for_row] looking for name containing {:?} in {} rows",
+        name, rows.len()
+    );
 
-        let mut matches = false;
-        if let Ok(el) = label_el {
-            if let Ok(txt) = el.text().await {
-                let txt_trim = txt.trim();
-                if !txt_trim.is_empty() && txt_trim.contains(name) {
-                    matches = true;
-                }
-            }
-        }
+    for (idx, row) in rows.into_iter().enumerate() {
+        // Try primary label: the folder/document link area
+        let label_text = if let Ok(label_el) =
+            row.find(By::Css("[data-test='document-tree-node-link']")).await
+        {
+            label_el.text().await.unwrap_or_default()
+        } else {
+            // Fallback: whole row text (a bit noisier, but robust)
+            row.text().await.unwrap_or_default()
+        };
 
-        if matches {
-            // Inside that row, click the options ("vertical dots") button
+        let label_trim = label_text.trim().to_string();
+        let label_lc = label_trim.to_lowercase();
+
+        println!("  row[{idx}] label='{label_trim}'");
+
+        if !label_lc.is_empty() && label_lc.contains(&name_lc) {
+            // Found the row we want: click its options/menu button
             if let Ok(btn) = row.find(By::Css("button[data-test='option-vertical']")).await {
+                println!("  → clicking options menu on row[{idx}] for '{}'", label_trim);
                 btn.click().await?;
-                println!("Clicked options menu for row: {}", name);
                 return Ok(());
+            } else {
+                println!(
+                    "  row[{idx}] matched name but has no button[data-test='option-vertical']"
+                );
             }
         }
     }

@@ -20,7 +20,7 @@ use tokio::time::{sleep, Duration};
 use keyboard::type_text;
 use thirtyfour::By;
 use sheets::{fetch_sheet_values};
-
+use std::fs;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -153,6 +153,11 @@ async fn main() -> Result<()> {
                 let sy = sy.clamp(0, dh.saturating_sub(1));
                 println!("🖱️ Click screen mapped: ({},{})", sx, sy);
                 xdotool_move_and_click(&display, sx, sy, pt.double)?;
+		if let Err(e) = fs::remove_file(&path) {
+		    eprintln!("Warning: couldn't delete screenshot {}: {}", path, e);
+		} else {
+		    println!("🧹 Deleted screenshot {}", path);
+		}
             }
         }
     }
