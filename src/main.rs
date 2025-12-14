@@ -11,7 +11,12 @@ mod client;
 mod sheets;
 
 use anyhow::{Context, Result};
-use openai_client::{OpenAIConfig, ViewportPoint, call_openai_for_point, click_by_llm_dom_first, click_checkbox_for_row, click_options_menu_for_row};
+use openai_client::{
+	OpenAIConfig, ViewportPoint, call_openai_for_point, click_by_llm_dom_first, 
+	click_checkbox_for_row, click_options_menu_for_row, click_template_input, 
+	click_invoice_amount_input, click_sidebar_create_button, click_stage_option,
+	ask_boolean_question
+};
 use driver::{init_driver, cleanup_driver, screenshot_bytes};
 use mouse::{ensure_xdotool, reset_zoom, get_active_window_geometry, get_display_geometry, xdotool_move_and_click};
 use coords::{png_dimensions, NormalizationInputs, viewport_to_screen};
@@ -44,22 +49,22 @@ async fn main() -> Result<()> {
     let openai_cfg = OpenAIConfig::from_env().ok();
  
     // Execute each step in order
-    for step in plan.steps.iter() {
+    for (step_idx, step) in plan.steps.iter().enumerate() {
         match step {
-            Step::VisitUrl(url) => {
+            Step::VisitUrl { url, .. } => {
                 println!("🌐 Visit: {}", url);
                 bundle.driver.goto(url).await?;
             }
-	    Step::TypeText { text, per_char_delay_ms } => {
+	    Step::TypeText { text, per_char_delay_ms, .. } => {
 		ensure_xdotool()?;
 		println!("TypeText ({} chars, {}ms/char)", text.len(), per_char_delay_ms);
 		type_text(&display, text, *per_char_delay_ms)?;
 	    }
-	    Step::TypeKey { key } => {
+	    Step::TypeKey { key, .. } => {
 		println!("Pressing key: {key}");
 		keyboard::xdotool_key(&display, key)?;
 	    }
-	    Step::TypeOTP { uid } => {
+	    Step::TypeOTP { uid, .. } => {
 		let (_, _, code) = match fetch_keeper_creds_sync() {
         	    Ok(v) => v,
         	    Err(e) => {
@@ -84,21 +89,43 @@ async fn main() -> Result<()> {
                 println!("⏳ Wait {}s", secs);
                 sleep(Duration::from_secs(*secs)).await;
             }
-	    Step::SubmitForm => {
-		if let Ok(el) = bundle.driver.find(By::Css("button[type='submit']")).await {
-		    el.click().await?;
-		    continue;
-		}
-		return Err(anyhow::anyhow!("No submit button found"));
+	    Step::SubmitForm { .. } => {
+	    	if let Ok(el) = bundle.driver
+        	    .find(By::Css("button[type='submit']"))
+	        .await
+	        {
+	            el.click().await?;
+	            continue;
+	    	}
+
+	    // 3) If neither exists, fail
+	    	return Err(anyhow::anyhow!("No submit/create button found"));
 	    }
-	    Step::ClickCheckbox { name } => {
+	    Step::ClickStage { name, .. } => {
+		println!("Clicking Stage given {name}");
+		click_stage_option(&bundle.driver, &name).await?;
+	    }
+	    Step::ClickCheckbox { name, .. } => {
+		println!("Clicking checkbox for row containing {name}");
 		click_checkbox_for_row(&bundle.driver, &name).await?;
 	    }
-	    Step::ClickOptionsMenu { name } => {
+	    Step::ClickOptionsMenu { name, .. } => {
 		println!("Clicking options menu containing name: {name}");
 		click_options_menu_for_row(&bundle.driver, &name).await?;
 	    }
-	    Step::ClickByDom { prompt, double } => {
+	    Step::ClickTemplate { .. } => {
+		println!("Clicking template for invoice");
+		click_template_input(&bundle.driver).await?;
+	    }
+	    Step::ClickCreate { .. } => {
+		println!("Clicking create button for invoice");
+		click_sidebar_create_button(&bundle.driver).await?;
+	    }
+	    Step::ClickInvoiceAmount { .. } => {
+		println!("Clicking invoice amount text input box");
+		click_invoice_amount_input(&bundle.driver).await?;
+	    }
+	    Step::ClickByDom { prompt, double, .. } => {
 		let cfg = match &openai_cfg {
                     Some(c) => c,
                     None => {
@@ -108,7 +135,7 @@ async fn main() -> Result<()> {
                 };
 		click_by_llm_dom_first(&bundle.driver, &cfg, prompt, *double).await?;
 	    }
-            Step::ClickByLlm { prompt, double } => {
+            Step::ClickByLlm { prompt, double, .. } => {
                 let cfg = match &openai_cfg {
                     Some(c) => c,
                     None => {
@@ -158,6 +185,41 @@ async fn main() -> Result<()> {
 		} else {
 		    println!("🧹 Deleted screenshot {}", path);
 		}
+            }
+        }
+        
+        // After each step, check for validation question and ask it
+        if let Some(ref cfg) = openai_cfg.as_ref() {
+            if let Some(question) = step.validation_question() {
+                // Wait for page to settle
+                sleep(Duration::from_millis(1000)).await;
+                
+                // Take screenshot from the automation driver
+                let (screenshot_path, screenshot_bytes) = screenshot_bytes(&bundle.driver, "step-validation.png").await?;
+                
+                // Ask the validation question
+                match ask_boolean_question(cfg, &screenshot_bytes, &question).await {
+                    Ok(result) => {
+                        let status = if result.answer { "✅ PASSED" } else { "❌ FAILED" };
+                        println!("👁️ Step {} validation: {} (confidence: {:.2})", 
+                            step_idx + 1, 
+                            status,
+                            result.confidence.unwrap_or(0.0)
+                        );
+                        println!("   Question: {}", question);
+                        if let Some(ref reasoning) = result.reasoning {
+                            println!("   Reasoning: {}", reasoning);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("⚠️ Failed to validate step {}: {}", step_idx + 1, e);
+                    }
+                }
+                
+                // Clean up screenshot unless keeping them
+                if std::env::var("KEEP_OBSERVER_SCREENSHOTS").map(|v| v != "1").unwrap_or(true) {
+                    let _ = fs::remove_file(&screenshot_path);
+                }
             }
         }
     }

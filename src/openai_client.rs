@@ -179,6 +179,14 @@ pub async fn collect_ui_candidates(driver: &WebDriver, cap: usize) -> Result<Vec
         ".btn",
         ".button",
 	"[data-test='document-tree-node-link']",
+    	"input[data-test*='amount_input']", // invoice amount input box
+    	"input[data-test*='title_input']",  // service name input
+    	"textarea[data-test*='description_input']", // description input
+        "[data-test='template-select']",    // invoice template box
+	"[data-test='shared-section__button']",
+	"article[data-test='shared-element__kanban-board__kanban-card']",
+	"[data-test='select-trigger']",
+	"[data-test='shared-section__dropdown-list-item']",
     ]
     .join(",");
 
@@ -261,6 +269,140 @@ pub async fn click_checkbox_for_row(driver: &WebDriver, name: &str) -> Result<()
 	name
     ))
 }
+
+pub async fn click_stage_option(driver: &WebDriver, name: &str) -> Result<()> {
+    // All dropdown items share this selector
+    let items = driver
+        .find_all(By::Css("[data-test='shared-section__dropdown-list-item']"))
+        .await?;
+
+    for item in items {
+        let text = item.text().await?.trim().to_string();
+
+        if text.contains(name) {
+            // Scroll into view (avoids intercepted clicks)
+            let _ = driver.execute_script(
+                r#"arguments[0].scrollIntoView({behavior: "instant", block: "center"});"#,
+                vec![item.to_json()?],
+            ).await;
+
+            item.click().await?;
+            println!("✔ Selected stage option: {}", name);
+            return Ok(());
+        }
+    }
+
+    Err(anyhow::anyhow!(
+        "Could not find dropdown stage option containing: {}",
+        name
+    ))
+}
+
+
+
+pub async fn click_invoice_amount_input(driver: &WebDriver) -> Result<()> {
+    // Find the amount input box
+    let amount_input = driver
+        .find(By::Css("[data-test='shared-element__invoice-line-items-form__amount_input']"))
+        .await?;
+
+    // Scroll into view just to be extra safe
+    driver.execute_script(
+        "arguments[0].scrollIntoView({behavior:'auto', block:'center'});",
+        vec![amount_input.to_json()?],
+    ).await?;
+
+    // Click the input (this will auto-focus)
+    amount_input.click().await?;
+
+    Ok(())
+}
+
+
+pub async fn click_sidebar_create_button(driver: &WebDriver) -> Result<()> {
+    // Strategy:
+    // 1. Look for the primary create button inside the sidebar footer
+    // 2. Fallback: any visible shared-section button with text "Create"
+    // 3. Fallback: generic submit button types
+
+    // 1. Highly specific selector: footer create button in invoice sidebar
+    let candidates = driver
+        .find_all(By::Css(
+            "div[data-test='bill-form-sidebar'] \
+             footer button[data-test='shared-section__button']",
+        ))
+        .await?;
+
+    for el in candidates {
+        if el.is_displayed().await.unwrap_or(false) {
+            let txt = el.text().await.unwrap_or_default();
+            if txt.trim().eq_ignore_ascii_case("Create") {
+                el.click().await?;
+                return Ok(());
+            }
+        }
+    }
+
+    // 2. Fallback: ANY visible shared-section__button with the label "Create"
+    let fallback_buttons = driver
+        .find_all(By::Css("button[data-test='shared-section__button']"))
+        .await?;
+
+    for el in fallback_buttons {
+        if el.is_displayed().await.unwrap_or(false) {
+            let txt = el.text().await.unwrap_or_default();
+            if txt.trim().eq_ignore_ascii_case("Create") {
+                el.click().await?;
+                return Ok(());
+            }
+        }
+    }
+
+    // 3. Last fallback: HTML submit buttons
+    if let Ok(el) = driver.find(By::Css("button[type='submit']")).await {
+        if el.is_displayed().await.unwrap_or(false) {
+            el.click().await?;
+            return Ok(());
+        }
+    }
+
+    Err(anyhow::anyhow!("No Create button found"))
+}
+
+
+
+
+pub async fn click_template_input(driver: &WebDriver) -> Result<()> {
+    // Locate the main wrapper
+    let wrapper = driver
+        .find(By::Css("[data-test='template-select']"))
+        .await
+        .context("Could not find template-select container")?;
+
+    // React-Select requires clicking the control div
+    let control = wrapper
+        .find(By::Css(".react-select__control"))
+        .await
+        .context("Could not find react-select__control")?;
+
+    // Try a normal Selenium click
+    let clicked = control.click().await;
+
+    if clicked.is_err() {
+        // JS fallback for stubborn React-Select controls
+        driver
+            .execute_script(
+                "arguments[0].click();",
+                vec![serde_json::to_value(&control)?],
+            )
+            .await
+            .context("JS click fallback failed for template select")?;
+    }
+
+    Ok(())
+}
+
+
 
 pub async fn click_options_menu_for_row(driver: &WebDriver, name: &str) -> Result<()> {
     let name_lc = name.to_lowercase();
@@ -995,3 +1137,128 @@ fn save_dotmap_png(
     println!("🟡 Saved LLM dotmap to {}", path.display());
     Ok(())
 }
+
+#[derive(Deserialize, Debug)]
+pub struct BooleanResponse {
+    pub answer: bool,
+    pub confidence: Option<f32>,
+    pub reasoning: Option<String>,
+}
+
+/// Ask OpenAI a yes/no question about a screenshot from the existing automation and get a boolean response
+pub async fn ask_boolean_question(
+    cfg: &OpenAIConfig,
+    screenshot_png: &[u8],
+    question: &str,
+) -> Result<BooleanResponse> {
+    let client = reqwest::Client::builder().timeout(cfg.timeout).build()?;
+    
+    let b64 = base64::engine::general_purpose::STANDARD.encode(screenshot_png);
+    let data_url = format!("data:image/png;base64,{}", b64);
+    
+    let full_prompt = format!(
+        "{}\n\nReturn ONLY JSON in the exact form {{\"answer\":bool,\"confidence\":float,\"reasoning\":\"string\"}}. \
+         answer must be true or false.",
+        question
+    );
+    
+    let messages = vec![
+        ChatMessage {
+            role: "system",
+            content: ChatContent::Text(
+                "You are analyzing screenshots from an automation and answering yes/no questions. \
+                 Output ONLY JSON (no markdown fences, no prose) with keys answer:bool, confidence:float, reasoning:string. \
+                 answer must be true or false. confidence should be between 0.0 and 1.0.".to_string()
+            ),
+        },
+        ChatMessage {
+            role: "user",
+            content: ChatContent::Parts(vec![
+                ContentPart::Text { text: full_prompt },
+                ContentPart::ImageUrl { image_url: ImageUrl { url: data_url } },
+            ]),
+        },
+    ];
+    
+    let req_body = ChatRequest {
+        model: &cfg.model,
+        temperature: 0.3, // Lower temperature for more consistent boolean answers
+        response_format: ResponseFormat::JsonObject,
+        messages,
+    };
+    
+    let url = format!("{}/chat/completions", cfg.base_url);
+    let mut last_err: Option<anyhow::Error> = None;
+    
+    for attempt in 0..cfg.max_retries {
+        let resp = client
+            .post(&url)
+            .bearer_auth(&cfg.api_key)
+            .json(&req_body)
+            .send()
+            .await;
+        
+        match resp {
+            Ok(r) => {
+                let status = r.status();
+                if !status.is_success() {
+                    let headers = r.headers().clone();
+                    let text = r.text().await.unwrap_or_default();
+                    
+                    if status.as_u16() == 429 {
+                        let wait_ms = compute_rate_limit_sleep_ms(&headers, &text, attempt);
+                        eprintln!(
+                            "⏳ 429 rate-limited (attempt {}/{}). Sleeping ~{} ms",
+                            attempt + 1, cfg.max_retries, wait_ms
+                        );
+                        tokio::time::sleep(Duration::from_millis(wait_ms)).await;
+                        continue;
+                    }
+                    
+                    last_err = Some(anyhow::anyhow!("OpenAI HTTP {}: {}", status, text));
+                } else {
+                    let parsed: ChatResponse = r.json().await?;
+                    let content = parsed
+                        .choices
+                        .get(0)
+                        .ok_or_else(|| anyhow::anyhow!("No choices from OpenAI"))?
+                        .message
+                        .content
+                        .trim()
+                        .to_string();
+                    
+                    let cleaned = strip_code_fences(&content);
+                    
+                    match serde_json::from_str::<BooleanResponse>(cleaned) {
+                        Ok(result) => {
+                            println!("🤔 Question: {}", question);
+                            println!("   Answer: {} (confidence: {:.2})", 
+                                result.answer, 
+                                result.confidence.unwrap_or(0.0)
+                            );
+                            if let Some(ref reasoning) = result.reasoning {
+                                println!("   Reasoning: {}", reasoning);
+                            }
+                            return Ok(result);
+                        }
+                        Err(e) => {
+                            last_err = Some(anyhow::anyhow!(
+                                "Failed to parse JSON from OpenAI: {}\nRaw content: {}",
+                                e,
+                                content
+                            ));
+                        }
+                    }
+                }
+            }
+            Err(e) => last_err = Some(anyhow::anyhow!(e)),
+        }
+        
+        if attempt + 1 < cfg.max_retries {
+            tokio::time::sleep(Duration::from_millis(400 * (attempt as u64 + 1))).await;
+        }
+    }
+    
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("OpenAI boolean question request failed")))
+}
+
