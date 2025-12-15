@@ -69,17 +69,9 @@ Run artifacts and screenshots:
 - LLM clicks: `click_by_llm_dom_first` first enumerates DOM candidates, asks OpenAI to choose, and falls back to heuristics.
 - Screen clicks: `call_openai_for_point` asks OpenAI for viewport coordinates on a screenshot, then maps them to screen space using window geometry and optional offsets.
 
-## Git-ignored items (and why)
-- `/target`, `debug` – compiled artifacts from Cargo.
-- `/runs`, `/screenshot*`, `/step-validation*` – large/ephemeral screenshots and per-run artifacts.
-- `/.env`, `/config.json` – secrets and Keeper config must stay local.
-- `/src/plan.rs`, `/src/creds.rs` – local automation flow and secret-handling code kept out of Git history.
-- `/.venv` – local Python virtualenvs.
-- `**/*.rs.bk`, `*.pdb`, `**/mutants.out*/` – tool- or platform-generated files.
-- JetBrains/RustRover metadata (commented template) to avoid committing IDE clutter.
-
 ## Safety notes
 - The program moves your real cursor and types into the active X11 display. Run inside a dedicated VNC/desktop session.
 - `HEADFUL=1` is enforced; headless is not supported.
 - Screenshots may be written temporarily; set `KEEP_OBSERVER_SCREENSHOTS=1` to keep validation captures.
+- Various folder directories and sensitive automation source files have been omitted
 
