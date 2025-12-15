@@ -62,17 +62,6 @@ Run artifacts and screenshots:
 - `CURRENT_STEP_NO` – tag dotmaps with the active step number.
 - `KEEP_OBSERVER_SCREENSHOTS` – set to `1` to keep validation screenshots (otherwise deleted).
 
-## Running locally
-1) Install dependencies: `chromedriver`, `xdotool`, Chrome/Chromium.
-2) Create `.env` with the variables above (include API keys and portal pieces).
-3) Start an X/VNC session and ensure `DISPLAY_VNC` matches it.
-4) Run: `cargo run --release` (or `cargo run`). The automation will:
-   - Fetch sheet rows,
-   - Build an `AutomationPlan`,
-   - Launch Chrome on the target display,
-   - Execute steps for each client with real mouse/keyboard,
-   - Optionally validate steps via OpenAI screenshots.
-
 ## How the plan works
 - Steps are defined in `plan.rs` (e.g., `VisitUrl`, `ClickByDom`, `ClickByLlm`, `TypeText`, `SubmitForm`, `ClickStage`, etc.).
 - `AutomationPlan::client_loop` builds a plan per client row (seal docs, send emails, move pipeline cards, request signatures, create invoices).
