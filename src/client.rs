@@ -19,7 +19,7 @@ pub struct Client {
     pub signature_template: String,   // "SignatureTemplate"
     pub require_kba: bool,            // "RequireKBA" (Y/N)
     pub invoice: String,              // "Invoice"
-    pub invoice_amount: f64,          // "InvoiceAmount"
+    pub invoice_amount: String,          // "InvoiceAmount"
     pub invoice_template: String,     // "InvoiceTemplate"
     pub closer: String,               // "Closer"
     pub pipeline: String,             // "Pipeline"
@@ -39,6 +39,12 @@ impl Client {
     pub fn docs_url(&self) -> String {
 	let base = std::env::var("USER_PORTAL_A").unwrap_or_default();
 	let post = std::env::var("DOCS_PORTAL").unwrap_or_default();
+	format!("{base}{}{post}", self.client_id)
+    }
+
+    pub fn pipeline_url(&self) -> String {
+	let base = std::env::var("USER_PORTAL_A").unwrap_or_default();
+	let post = std::env::var("PIPELINE_PORTAL").unwrap_or_default();
 	format!("{base}{}{post}", self.client_id)
     }
     
@@ -152,7 +158,7 @@ impl ClientStore {
                 signature_template: get_cell(row, c_sig_tmpl),
                 require_kba: parse_yn(&get_cell(row, c_require_kba)),
                 invoice: get_cell(row, c_invoice),
-                invoice_amount: parse_f64(&get_cell(row, c_invoice_amount)),
+                invoice_amount: get_cell(row, c_invoice_amount),
                 invoice_template: get_cell(row, c_invoice_tmpl),
                 closer: get_cell(row, c_closer),
                 pipeline: get_cell(row, c_pipeline),

@@ -1182,7 +1182,7 @@ pub async fn ask_boolean_question(
     
     let req_body = ChatRequest {
         model: &cfg.model,
-        temperature: 0.3, // Lower temperature for more consistent boolean answers
+        temperature: 1.0, // Lower temperature for more consistent boolean answers
         response_format: ResponseFormat::JsonObject,
         messages,
     };
