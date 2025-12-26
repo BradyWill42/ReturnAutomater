@@ -173,20 +173,20 @@ pub async fn collect_ui_candidates(driver: &WebDriver, cap: usize) -> Result<Vec
         "a[href]",
         "[role='button']",
         "[role='link']",
-	"input[type='submit']",
+	    "input[type='submit']",
         "input[type='button']",
         "[tabindex]",
         ".btn",
         ".button",
-	"[data-test='document-tree-node-link']",
+	    "[data-test='document-tree-node-link']",
     	"input[data-test*='amount_input']", // invoice amount input box
     	"input[data-test*='title_input']",  // service name input
     	"textarea[data-test*='description_input']", // description input
         "[data-test='template-select']",    // invoice template box
-	"[data-test='shared-section__button']",
-	"article[data-test='shared-element__kanban-board__kanban-card']",
-	"[data-test='select-trigger']",
-	"[data-test='shared-section__dropdown-list-item']",
+        "[data-test='shared-section__button']",
+        "article[data-test='shared-element__kanban-board__kanban-card']",
+        "[data-test='select-trigger']",
+        "[data-test='shared-section__dropdown-list-item']",
     ]
     .join(",");
 
@@ -255,7 +255,7 @@ pub async fn click_checkbox_for_row(driver: &WebDriver, name: &str) -> Result<()
 
         if text.contains(name) {
             let checkbox = row
-                .find(By::Css("label.checkbox[data-test='shared-section__checkbox']"))
+                .find(By::Css("label.checkbox[data-test='Checkbox']"))
                 .await?;
 
             checkbox.click().await?;

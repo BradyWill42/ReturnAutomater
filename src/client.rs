@@ -25,6 +25,7 @@ pub struct Client {
     pub pipeline: String,             // "Pipeline"
     pub seal: String,                 // "Seal"
     pub year_to_seal: String,    // "YearToSeal"
+    pub row_index: usize,             // 1-based row index in the sheet (header is row 1, first data row is 2)
 }
 
 impl Client {
@@ -76,12 +77,18 @@ impl Client {
 #[derive(Debug, Default)]
 pub struct ClientStore {
     pub clients: Vec<Client>,
+    pub seal_column_index: usize, // 1-based column index for "Seal" column
+    pub me_column_index: usize,   // 1-based column index for "ME" column
 }
 
 impl ClientStore {
     /// Create an empty store.
     pub fn new() -> Self {
-        Self { clients: Vec::new() }
+        Self { 
+            clients: Vec::new(),
+            seal_column_index: 0, // Will be set when loading from sheet
+            me_column_index: 0,   // Will be set when loading from sheet
+        }
     }
 
 
@@ -134,14 +141,21 @@ impl ClientStore {
         let c_seal = idx("Seal")?;
         let c_year_to_seal = idx("YearToSeal")?;
 
-        let mut store = ClientStore::new();
+        let mut store = ClientStore {
+            clients: Vec::new(),
+            seal_column_index: c_seal + 1, // Convert 0-based to 1-based
+            me_column_index: c_me + 1,     // Convert 0-based to 1-based
+        };
 
-        for row in values.iter().skip(1) {
+        for (row_idx, row) in values.iter().skip(1).enumerate() {
             let me = get_cell(row, c_me);
             // Stop at first empty ME (your rule).
             if me.trim().is_empty() {
                 break;
             }
+
+            // row_idx is 0-based from skip(1), so actual sheet row = row_idx + 2 (header is row 1)
+            let sheet_row = row_idx + 2;
 
             let client = Client {
                 me,
@@ -164,6 +178,7 @@ impl ClientStore {
                 pipeline: get_cell(row, c_pipeline),
                 seal: get_cell(row, c_seal),
                 year_to_seal: get_cell(row, c_year_to_seal),
+                row_index: sheet_row,
             };
 
             store.clients.push(client);

@@ -24,7 +24,7 @@ use plan::{AutomationPlan, Step, fetch_keeper_creds_sync};
 use tokio::time::{sleep, Duration};
 use keyboard::type_text;
 use thirtyfour::By;
-use sheets::{fetch_sheet_values};
+use sheets::{fetch_sheet_values, update_cell_value_and_color};
 use std::fs;
 
 // Extract step execution into a helper function
@@ -166,6 +166,22 @@ async fn execute_step(
                 eprintln!("Warning: couldn't delete screenshot {}: {}", path, e);
             } else {
                 println!("🧹 Deleted screenshot {}", path);
+            }
+        }
+        Step::UpdateSheetCell { row, col, value, success, yellow } => {
+            let color = if *yellow {
+                (255, 255, 0) // Yellow
+            } else if *success {
+                (0, 255, 0) // Green
+            } else {
+                (255, 0, 0) // Red
+            };
+            let color_name = if *yellow { "yellow" } else if *success { "green" } else { "red" };
+            println!("📝 Updating sheet cell at row {row}, col {col} to '{}' ({})", 
+                value, color_name);
+            if let Err(e) = update_cell_value_and_color(*row, *col, &value, color).await {
+                eprintln!("⚠️ Failed to update sheet cell: {}", e);
+                // Don't fail the whole automation if sheet update fails
             }
         }
     }
