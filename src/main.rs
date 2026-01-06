@@ -15,7 +15,7 @@ use openai_client::{
 	OpenAIConfig, ViewportPoint, call_openai_for_point, click_by_llm_dom_first, 
 	click_checkbox_for_row, click_options_menu_for_row, click_template_input, 
 	click_invoice_amount_input, click_sidebar_create_button, click_stage_option,
-	ask_boolean_question
+	ask_boolean_question, get_largest_run_dir
 };
 use driver::{init_driver, cleanup_driver, screenshot_bytes};
 use mouse::{ensure_xdotool, reset_zoom, get_active_window_geometry, get_display_geometry, xdotool_move_and_click};
@@ -184,6 +184,10 @@ async fn execute_step(
                 // Don't fail the whole automation if sheet update fails
             }
         }
+        Step::StopClient => {
+            println!("⏹️  Stopping execution for current client");
+            return Err(anyhow::anyhow!("STOP_CLIENT"));
+        }
     }
     Ok(())
 }
@@ -212,7 +216,18 @@ async fn main() -> Result<()> {
     // Execute each step in order
     for (step_idx, step) in plan.steps.iter().enumerate() {
         // Execute the main step
-        execute_step(step, &mut bundle, &display, &openai_cfg).await?;
+        match execute_step(step, &mut bundle, &display, &openai_cfg).await {
+            Ok(()) => {},
+            Err(e) => {
+                // Check if this is a StopClient signal - just continue to next step (next client)
+                if e.to_string() == "STOP_CLIENT" {
+                    println!("⏭️  Stopping current client, moving to next");
+                    continue;
+                } else {
+                    return Err(e);
+                }
+            }
+        }
         
         // After each step, check for validation question and ask it
         if let Some(ref cfg) = openai_cfg.as_ref() {
@@ -220,8 +235,32 @@ async fn main() -> Result<()> {
                 // Wait for page to settle (2 seconds to capture current state)
                 sleep(Duration::from_millis(2000)).await;
                 
+                // Determine where to save validation screenshot (current run directory)
+                let run_dir = get_largest_run_dir()
+                    .context("No run directory found for validation screenshots")?;
+                // Find the next sequential number for validation screenshots
+                let mut max_num = 0;
+                if let Ok(entries) = fs::read_dir(&run_dir) {
+                    for entry in entries.flatten() {
+                        if let Some(name) = entry.file_name().to_str() {
+                            if name.starts_with("validation-") && name.ends_with(".png") {
+                                // Extract number from filename like "validation-003.png"
+                                if let Some(num_str) = name.strip_prefix("validation-").and_then(|s| s.strip_suffix(".png")) {
+                                    if let Ok(num) = num_str.parse::<usize>() {
+                                        max_num = max_num.max(num);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                let next_num = max_num + 1;
+                let screenshot_path_str = run_dir.join(format!("validation-{:03}.png", next_num))
+                    .to_string_lossy()
+                    .to_string();
+                
                 // Take screenshot from the automation driver
-                let (screenshot_path, screenshot_bytes) = screenshot_bytes(&bundle.driver, "step-validation.png").await?;
+                let (screenshot_path, screenshot_bytes) = screenshot_bytes(&bundle.driver, &screenshot_path_str).await?;
                 
                 // Ask the validation question
                 match ask_boolean_question(cfg, &screenshot_bytes, &question).await {
@@ -241,7 +280,17 @@ async fn main() -> Result<()> {
                         if let Some(action_steps) = step.validation_actions(result.answer) {
                             println!("   🔄 Executing validation action steps...");
                             for action_step in action_steps {
-                                execute_step(&action_step, &mut bundle, &display, &openai_cfg).await?;
+                                match execute_step(&action_step, &mut bundle, &display, &openai_cfg).await {
+                                    Ok(()) => {},
+                                    Err(e) => {
+                                        if e.to_string() == "STOP_CLIENT" {
+                                            println!("⏭️  Stopping current client, moving to next");
+                                            break; // Break out of validation action steps loop
+                                        } else {
+                                            return Err(e);
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

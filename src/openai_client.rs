@@ -1041,14 +1041,87 @@ fn compute_rate_limit_sleep_ms(
 
 /* -------------------- Heat dotmap helpers (time-based) -------------------- */
 
-fn ensure_run_dir() -> PathBuf {
+/// Get the largest numbered run directory without creating a new one.
+/// Returns the directory if found, or None if no run directories exist.
+pub fn get_largest_run_dir() -> Option<PathBuf> {
+    // Check if RUN_DIR is already set (current run directory)
     if let Ok(dir) = std::env::var("RUN_DIR") {
-        let p = PathBuf::from(dir);
-        let _ = fs::create_dir_all(&p);
-        return p;
+        let path = PathBuf::from(&dir);
+        if path.exists() && path.is_dir() {
+            return Some(path);
+        }
     }
-    let ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
-    let p = Path::new("runs").join(format!("run-{}", ms));
+    
+    // Otherwise, find the largest numbered run directory
+    let base_dir = PathBuf::from("runs");
+    if !base_dir.exists() {
+        return None;
+    }
+    
+    let mut max_run_num = 0;
+    let mut max_run_dir: Option<PathBuf> = None;
+    
+    // Read the base directory and find the highest run number
+    if let Ok(entries) = fs::read_dir(&base_dir) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                if name.starts_with("run-") {
+                    // Try to parse the number after "run-"
+                    if let Some(num_str) = name.strip_prefix("run-") {
+                        if let Ok(num) = num_str.parse::<usize>() {
+                            if num > max_run_num {
+                                max_run_num = num;
+                                max_run_dir = Some(entry.path());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    max_run_dir
+}
+
+fn ensure_run_dir() -> PathBuf {
+    let base_dir = if let Ok(dir) = std::env::var("RUN_DIR") {
+        PathBuf::from(dir)
+    } else {
+        PathBuf::from("runs")
+    };
+    
+    // Check if the path is already a specific run folder (contains "run-")
+    let path_str = base_dir.to_string_lossy();
+    if path_str.contains("run-") && base_dir.exists() && base_dir.is_dir() {
+        // It's already a specific run folder, use it as-is
+        let _ = fs::create_dir_all(&base_dir);
+        return base_dir;
+    }
+    
+    // It's a base directory, find or create the next sequential run folder
+    let _ = fs::create_dir_all(&base_dir);
+    
+    let mut max_run_num = 0;
+    
+    // Read the base directory and find the highest run number
+    if let Ok(entries) = fs::read_dir(&base_dir) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                if name.starts_with("run-") {
+                    // Try to parse the number after "run-"
+                    if let Some(num_str) = name.strip_prefix("run-") {
+                        if let Ok(num) = num_str.parse::<usize>() {
+                            max_run_num = max_run_num.max(num);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // Create the next run folder (run-001, run-002, etc.)
+    let next_run_num = max_run_num + 1;
+    let p = base_dir.join(format!("run-{:03}", next_run_num));
     let _ = fs::create_dir_all(&p);
     std::env::set_var("RUN_DIR", &p);
     p
