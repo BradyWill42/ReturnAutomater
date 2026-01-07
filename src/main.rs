@@ -188,7 +188,115 @@ async fn execute_step(
             println!("⏹️  Stopping execution for current client");
             return Err(anyhow::anyhow!("STOP_CLIENT"));
         }
+        Step::Abort => {
+            println!("🛑 Aborting program due to critical failure (e.g., login failure)");
+            return Err(anyhow::anyhow!("ABORT_PROGRAM"));
+        }
     }
+    Ok(())
+}
+
+// Execute a step and recursively check validation questions for nested steps
+async fn execute_step_with_validation(
+    step: &Step,
+    bundle: &mut driver::DriverBundle,
+    display: &str,
+    openai_cfg: &Option<openai_client::OpenAIConfig>,
+    step_label: Option<&str>,
+) -> Result<()> {
+    // Execute the main step
+    execute_step(step, bundle, display, openai_cfg).await?;
+    
+    // After each step, check for validation question and ask it
+    if let Some(ref cfg) = openai_cfg.as_ref() {
+        if let Some(question) = step.validation_question() {
+            // Wait for page to settle (2 seconds to capture current state)
+            sleep(Duration::from_millis(2000)).await;
+            
+            // Determine where to save validation screenshot (current run directory)
+            let run_dir = get_largest_run_dir()
+                .context("No run directory found for validation screenshots")?;
+            // Find the next sequential number for validation screenshots
+            let mut max_num = 0;
+            if let Ok(entries) = fs::read_dir(&run_dir) {
+                for entry in entries.flatten() {
+                    if let Some(name) = entry.file_name().to_str() {
+                        if name.starts_with("validation-") && name.ends_with(".png") {
+                            // Extract number from filename like "validation-003.png"
+                            if let Some(num_str) = name.strip_prefix("validation-").and_then(|s| s.strip_suffix(".png")) {
+                                if let Ok(num) = num_str.parse::<usize>() {
+                                    max_num = max_num.max(num);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            let next_num = max_num + 1;
+            let screenshot_path_str = run_dir.join(format!("validation-{:03}.png", next_num))
+                .to_string_lossy()
+                .to_string();
+            
+            // Take screenshot from the automation driver
+            let (screenshot_path, screenshot_bytes) = screenshot_bytes(&bundle.driver, &screenshot_path_str).await?;
+            
+            // Ask the validation question
+            match ask_boolean_question(cfg, &screenshot_bytes, &question).await {
+                Ok(result) => {
+                    let status = if result.answer { "✅ PASSED" } else { "❌ FAILED" };
+                    let label = step_label.unwrap_or("step");
+                    println!("👁️ {} validation: {} (confidence: {:.2})", 
+                        label, 
+                        status,
+                        result.confidence.unwrap_or(0.0)
+                    );
+                    println!("   Question: {}", question);
+                    if let Some(ref reasoning) = result.reasoning {
+                        println!("   Reasoning: {}", reasoning);
+                    }
+                    
+                    // Execute validation action steps recursively
+                    if let Some(action_steps) = step.validation_actions(result.answer) {
+                        println!("   🔄 Executing validation action steps...");
+                        for (action_idx, action_step) in action_steps.iter().enumerate() {
+                            let action_label = format!("{} validation action {}", label, action_idx + 1);
+                            match Box::pin(execute_step_with_validation(
+                                action_step, 
+                                bundle, 
+                                &display, 
+                                openai_cfg,
+                                Some(&action_label)
+                            )).await {
+                                Ok(()) => {},
+                                Err(e) => {
+                                    let err_str = e.to_string();
+                                    if err_str == "STOP_CLIENT" {
+                                        println!("⏭️  Stopping current client, moving to next");
+                                        return Err(e); // Propagate STOP_CLIENT up
+                                    } else if err_str == "ABORT_PROGRAM" {
+                                        println!("🛑 Critical failure detected, aborting program");
+                                        return Err(e); // Propagate ABORT_PROGRAM up to exit
+                                    } else {
+                                        return Err(e);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    let label = step_label.unwrap_or("step");
+                    eprintln!("⚠️ Failed to validate {}: {}", label, e);
+                }
+            }
+            
+            // Clean up screenshot unless keeping them
+            if std::env::var("KEEP_OBSERVER_SCREENSHOTS").map(|v| v != "1").unwrap_or(true) {
+                let _ = fs::remove_file(&screenshot_path);
+            }
+        }
+    }
+    
     Ok(())
 }
 
@@ -215,93 +323,22 @@ async fn main() -> Result<()> {
 
     // Execute each step in order
     for (step_idx, step) in plan.steps.iter().enumerate() {
-        // Execute the main step
-        match execute_step(step, &mut bundle, &display, &openai_cfg).await {
+        let step_label = format!("Step {}", step_idx + 1);
+        // Execute the step with recursive validation checking
+        match execute_step_with_validation(step, &mut bundle, &display, &openai_cfg, Some(&step_label)).await {
             Ok(()) => {},
             Err(e) => {
+                let err_str = e.to_string();
                 // Check if this is a StopClient signal - just continue to next step (next client)
-                if e.to_string() == "STOP_CLIENT" {
+                if err_str == "STOP_CLIENT" {
                     println!("⏭️  Stopping current client, moving to next");
                     continue;
+                } else if err_str == "ABORT_PROGRAM" {
+                    // Abort the entire program (e.g., login failure)
+                    eprintln!("🛑 Program aborted due to critical failure");
+                    return Err(e);
                 } else {
                     return Err(e);
-                }
-            }
-        }
-        
-        // After each step, check for validation question and ask it
-        if let Some(ref cfg) = openai_cfg.as_ref() {
-            if let Some(question) = step.validation_question() {
-                // Wait for page to settle (2 seconds to capture current state)
-                sleep(Duration::from_millis(2000)).await;
-                
-                // Determine where to save validation screenshot (current run directory)
-                let run_dir = get_largest_run_dir()
-                    .context("No run directory found for validation screenshots")?;
-                // Find the next sequential number for validation screenshots
-                let mut max_num = 0;
-                if let Ok(entries) = fs::read_dir(&run_dir) {
-                    for entry in entries.flatten() {
-                        if let Some(name) = entry.file_name().to_str() {
-                            if name.starts_with("validation-") && name.ends_with(".png") {
-                                // Extract number from filename like "validation-003.png"
-                                if let Some(num_str) = name.strip_prefix("validation-").and_then(|s| s.strip_suffix(".png")) {
-                                    if let Ok(num) = num_str.parse::<usize>() {
-                                        max_num = max_num.max(num);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                let next_num = max_num + 1;
-                let screenshot_path_str = run_dir.join(format!("validation-{:03}.png", next_num))
-                    .to_string_lossy()
-                    .to_string();
-                
-                // Take screenshot from the automation driver
-                let (screenshot_path, screenshot_bytes) = screenshot_bytes(&bundle.driver, &screenshot_path_str).await?;
-                
-                // Ask the validation question
-                match ask_boolean_question(cfg, &screenshot_bytes, &question).await {
-                    Ok(result) => {
-                        let status = if result.answer { "✅ PASSED" } else { "❌ FAILED" };
-                        println!("👁️ Step {} validation: {} (confidence: {:.2})", 
-                            step_idx + 1, 
-                            status,
-                            result.confidence.unwrap_or(0.0)
-                        );
-                        println!("   Question: {}", question);
-                        if let Some(ref reasoning) = result.reasoning {
-                            println!("   Reasoning: {}", reasoning);
-                        }
-                        
-                        // Execute validation action steps
-                        if let Some(action_steps) = step.validation_actions(result.answer) {
-                            println!("   🔄 Executing validation action steps...");
-                            for action_step in action_steps {
-                                match execute_step(&action_step, &mut bundle, &display, &openai_cfg).await {
-                                    Ok(()) => {},
-                                    Err(e) => {
-                                        if e.to_string() == "STOP_CLIENT" {
-                                            println!("⏭️  Stopping current client, moving to next");
-                                            break; // Break out of validation action steps loop
-                                        } else {
-                                            return Err(e);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("⚠️ Failed to validate step {}: {}", step_idx + 1, e);
-                    }
-                }
-                
-                // Clean up screenshot unless keeping them
-                if std::env::var("KEEP_OBSERVER_SCREENSHOTS").map(|v| v != "1").unwrap_or(true) {
-                    let _ = fs::remove_file(&screenshot_path);
                 }
             }
         }

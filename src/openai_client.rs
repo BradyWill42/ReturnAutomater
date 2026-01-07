@@ -89,6 +89,15 @@ enum ResponseFormat {
 #[derive(Deserialize, Debug)]
 struct ChatResponse {
     choices: Vec<Choice>,
+    #[serde(default)]
+    usage: Option<UsageInfo>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+struct UsageInfo {
+    prompt_tokens: u32,
+    completion_tokens: u32,
+    total_tokens: u32,
 }
 
 #[derive(Deserialize, Debug)]
@@ -867,14 +876,44 @@ async fn call_openai_once(
                     // other non-success -> record and try again with small backoff
                     last_err = Some(anyhow::anyhow!("OpenAI HTTP {}: {}", status, text));
                 } else {
-                    // (optional) read limits for diagnostic
-                    if let Some(v) = r.headers().get("x-ratelimit-limit-tokens") {
-                        if let Ok(_s) = v.to_str() {
-                            println!("(diag) TPM cap reported: {}", _s);
-                        }
-                    }
+                    // (optional) read rate limit info for diagnostic
+                    let remaining_tokens = r.headers()
+                        .get("x-ratelimit-remaining-tokens")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| s.parse::<u64>().ok());
+                    
+                    let remaining_requests = r.headers()
+                        .get("x-ratelimit-remaining-requests")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| s.parse::<u64>().ok());
+                    
+                    let limit_requests = r.headers()
+                        .get("x-ratelimit-limit-requests")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| s.parse::<u64>().ok());
 
                     let parsed: ChatResponse = r.json().await?;
+                    
+                    // Log token usage and rate limit info from this request
+                    if let Some(ref usage) = parsed.usage {
+                        if let Some(remaining) = remaining_tokens {
+                            if let Some(remaining_rpm) = remaining_requests {
+                                if let Some(limit_rpm) = limit_requests {
+                                    println!("(diag) tokens used: {} (prompt: {}, completion: {}) | remaining: {} | RPM: {}/{}",
+                                        usage.total_tokens, usage.prompt_tokens, usage.completion_tokens, remaining, remaining_rpm, limit_rpm);
+                                } else {
+                                    println!("(diag) tokens used: {} (prompt: {}, completion: {}) | remaining: {} | RPM remaining: {}",
+                                        usage.total_tokens, usage.prompt_tokens, usage.completion_tokens, remaining, remaining_rpm);
+                                }
+                            } else {
+                                println!("(diag) tokens used: {} (prompt: {}, completion: {}) | remaining: {}",
+                                    usage.total_tokens, usage.prompt_tokens, usage.completion_tokens, remaining);
+                            }
+                        } else {
+                            println!("(diag) tokens used: {} (prompt: {}, completion: {})",
+                                usage.total_tokens, usage.prompt_tokens, usage.completion_tokens);
+                        }
+                    }
                     let content = parsed
                         .choices
                         .get(0)
