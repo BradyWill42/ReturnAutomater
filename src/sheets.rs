@@ -116,6 +116,43 @@ pub async fn fetch_sheet_values() -> Result<Vec<Vec<String>>> {
     Ok(body.values.unwrap_or_default())
 }
 
+/// Read a single cell value from Google Sheets.
+/// 
+/// - `row`: 1-based row index (header is row 1)
+/// - `col`: 1-based column index (A=1, B=2, etc.)
+/// Returns the cell value as a String, or empty string if the cell is empty.
+#[allow(dead_code)]
+pub async fn read_cell_value(row: usize, col: usize) -> Result<String> {
+    let spreadsheet_id = std::env::var("SHEETS_ID")?;
+    let sheet_name = std::env::var("SHEETS_RANGE")
+        .unwrap_or_else(|_| "Sheet1!A1:T".to_string())
+        .split('!')
+        .next()
+        .unwrap_or("Sheet1")
+        .to_string();
+    let api_key = std::env::var("SHEETS_API_KEY")?;
+
+    // Convert 1-based column index to A1 notation
+    let col_letter = column_index_to_letter(col);
+    let cell_range = format!("{sheet_name}!{col_letter}{row}");
+
+    let url = format!(
+        "https://sheets.googleapis.com/v4/spreadsheets/{}/values/{}?key={}",
+        spreadsheet_id, cell_range, api_key
+    );
+
+    let resp = reqwest::get(&url).await?;
+    let resp = resp.error_for_status()?;
+
+    let body: SheetValuesResponse = resp.json().await?;
+    let value = body.values
+        .and_then(|v| v.first().cloned())
+        .and_then(|row| row.first().cloned())
+        .unwrap_or_default();
+    
+    Ok(value)
+}
+
 /// Update a cell value and background color in Google Sheets.
 /// 
 /// - `row`: 1-based row index (header is row 1)
