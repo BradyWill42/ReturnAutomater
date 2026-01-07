@@ -212,7 +212,7 @@ async fn main() -> Result<()> {
  
     // OpenAI is only needed for ClickByLlm steps
     let openai_cfg = OpenAIConfig::from_env().ok();
- 
+
     // Execute each step in order
     for (step_idx, step) in plan.steps.iter().enumerate() {
         // Execute the main step
