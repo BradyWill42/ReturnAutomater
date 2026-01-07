@@ -17,7 +17,7 @@ pub struct DriverBundle {
     pub display: String,
 }
  
-pub async fn init_driver(login_url: &str) -> Result<DriverBundle> {
+pub async fn init_driver(_login_url: &str) -> Result<DriverBundle> {
     let _ = dotenvy::dotenv();
  
     let headful = env::var("HEADFUL").map_or(true, |v| v == "1");

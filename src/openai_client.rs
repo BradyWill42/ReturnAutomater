@@ -9,7 +9,7 @@ use crate::overlay::{overlay_grid_with_coords, GridOptions};
 // --- drawing + saving imports ---
 use image::{DynamicImage, ImageOutputFormat, Rgba, RgbaImage};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::task::JoinSet;
 
@@ -170,10 +170,10 @@ pub struct Candidate {
 }
 
 #[derive(Debug, Deserialize)]
-struct ClickDecision {
+pub(crate) struct ClickDecision {
     id: Option<usize>,
-    reason: Option<String>,
-    confidence: Option<f32>,
+    _reason: Option<String>,
+    _confidence: Option<f32>,
 }
 
 pub async fn collect_ui_candidates(driver: &WebDriver, cap: usize) -> Result<Vec<Candidate>> {
@@ -290,7 +290,7 @@ pub async fn click_stage_option(driver: &WebDriver, name: &str) -> Result<()> {
 
         if text.contains(name) {
             // Scroll into view (avoids intercepted clicks)
-            let _ = driver.execute_script(
+            let _ = driver.execute(
                 r#"arguments[0].scrollIntoView({behavior: "instant", block: "center"});"#,
                 vec![item.to_json()?],
             ).await;
@@ -316,7 +316,7 @@ pub async fn click_invoice_amount_input(driver: &WebDriver) -> Result<()> {
         .await?;
 
     // Scroll into view just to be extra safe
-    driver.execute_script(
+    driver.execute(
         "arguments[0].scrollIntoView({behavior:'auto', block:'center'});",
         vec![amount_input.to_json()?],
     ).await?;
@@ -400,7 +400,7 @@ pub async fn click_template_input(driver: &WebDriver) -> Result<()> {
     if clicked.is_err() {
         // JS fallback for stubborn React-Select controls
         driver
-            .execute_script(
+            .execute(
                 "arguments[0].click();",
                 vec![serde_json::to_value(&control)?],
             )

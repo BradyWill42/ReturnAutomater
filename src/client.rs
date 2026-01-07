@@ -4,6 +4,7 @@ use anyhow::{anyhow, Result};
 
 /// One client row from the sheet mapped into a strongly-typed struct.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Client {
     pub me: String,                   // "ME"
     pub returns_printed: bool,        // "Returns Printed?" (Y/N)
@@ -28,9 +29,11 @@ pub struct Client {
     pub row_index: usize,             // 1-based row index in the sheet (header is row 1, first data row is 2)
 }
 
+#[allow(dead_code)]
 impl Client {
     /// Build the portal URL for this client:
     /// USER_PORTAL_A + client_id + USER_PORTAL_B
+    
     pub fn portal_url(&self) -> String {
         let base = std::env::var("USER_PORTAL_A").unwrap_or_default();
         let post = std::env::var("USER_PORTAL_B").unwrap_or_default();
@@ -81,6 +84,7 @@ pub struct ClientStore {
     pub me_column_index: usize,   // 1-based column index for "ME" column
 }
 
+#[allow(dead_code)]
 impl ClientStore {
     /// Create an empty store.
     pub fn new() -> Self {
@@ -205,16 +209,3 @@ fn get_cell(row: &[String], idx: usize) -> String {
 fn parse_yn(s: &str) -> bool {
     matches!(s.trim().to_ascii_uppercase().as_str(), "Y" | "YES" | "TRUE" | "1")
 }
-fn parse_f64(s: &str) -> f64 {
-    s.trim().parse::<f64>().unwrap_or(0.0)
-}
-
-fn parse_i32_opt(s: &str) -> Option<i32> {
-    let t = s.trim();
-    if t.is_empty() {
-        None
-    } else {
-        t.parse::<i32>().ok()
-    }
-}
-
