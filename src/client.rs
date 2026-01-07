@@ -205,7 +205,6 @@ fn get_cell(row: &[String], idx: usize) -> String {
 fn parse_yn(s: &str) -> bool {
     matches!(s.trim().to_ascii_uppercase().as_str(), "Y" | "YES" | "TRUE" | "1")
 }
-
 fn parse_f64(s: &str) -> f64 {
     s.trim().parse::<f64>().unwrap_or(0.0)
 }
@@ -218,3 +217,4 @@ fn parse_i32_opt(s: &str) -> Option<i32> {
         t.parse::<i32>().ok()
     }
 }
+

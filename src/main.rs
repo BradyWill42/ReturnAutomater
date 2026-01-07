@@ -27,6 +27,35 @@ use thirtyfour::By;
 use sheets::{fetch_sheet_values, update_cell_value_and_color};
 use std::fs;
 
+/// Custom error type for control flow signals in automation steps
+#[derive(Debug)]
+pub enum ControlFlowError {
+    /// Stop current client and move to next
+    StopClient,
+    /// Abort entire program
+    AbortProgram,
+    /// Other error from automation
+    Other(anyhow::Error),
+}
+
+impl std::fmt::Display for ControlFlowError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ControlFlowError::StopClient => write!(f, "Stop current client and move to next"),
+            ControlFlowError::AbortProgram => write!(f, "Abort entire program"),
+            ControlFlowError::Other(e) => write!(f, "{}", e),
+        }
+    }
+}
+
+impl std::error::Error for ControlFlowError {}
+
+impl From<anyhow::Error> for ControlFlowError {
+    fn from(err: anyhow::Error) -> Self {
+        ControlFlowError::Other(err)
+    }
+}
+
 // Extract step execution into a helper function
 async fn execute_step(
     step: &Step,
@@ -186,11 +215,11 @@ async fn execute_step(
         }
         Step::StopClient => {
             println!("⏹️  Stopping execution for current client");
-            return Err(anyhow::anyhow!("STOP_CLIENT"));
+            return Err(ControlFlowError::StopClient.into());
         }
         Step::Abort => {
             println!("🛑 Aborting program due to critical failure (e.g., login failure)");
-            return Err(anyhow::anyhow!("ABORT_PROGRAM"));
+            return Err(ControlFlowError::AbortProgram.into());
         }
     }
     Ok(())
@@ -269,13 +298,19 @@ async fn execute_step_with_validation(
                             )).await {
                                 Ok(()) => {},
                                 Err(e) => {
-                                    let err_str = e.to_string();
-                                    if err_str == "STOP_CLIENT" {
-                                        println!("⏭️  Stopping current client, moving to next");
-                                        return Err(e); // Propagate STOP_CLIENT up
-                                    } else if err_str == "ABORT_PROGRAM" {
-                                        println!("🛑 Critical failure detected, aborting program");
-                                        return Err(e); // Propagate ABORT_PROGRAM up to exit
+                                    // Try to extract ControlFlowError from anyhow::Error
+                                    if let Some(cf_err) = e.downcast_ref::<ControlFlowError>() {
+                                        match cf_err {
+                                            ControlFlowError::StopClient => {
+                                                println!("⏭️  Stopping current client, moving to next");
+                                                return Err(ControlFlowError::StopClient.into());
+                                            }
+                                            ControlFlowError::AbortProgram => {
+                                                println!("🛑 Critical failure detected, aborting program");
+                                                return Err(ControlFlowError::AbortProgram.into());
+                                            }
+                                            ControlFlowError::Other(_) => return Err(e),
+                                        }
                                     } else {
                                         return Err(e);
                                     }
@@ -315,7 +350,7 @@ async fn main() -> Result<()> {
  
     let values = fetch_sheet_values().await?;
 
-    // Define your automation plan (replace demo() with your own steps)
+    // Define your automation plan
     let plan = AutomationPlan::client_loop(&values)?;
  
     // OpenAI is only needed for ClickByLlm steps
@@ -328,15 +363,21 @@ async fn main() -> Result<()> {
         match execute_step_with_validation(step, &mut bundle, &display, &openai_cfg, Some(&step_label)).await {
             Ok(()) => {},
             Err(e) => {
-                let err_str = e.to_string();
-                // Check if this is a StopClient signal - just continue to next step (next client)
-                if err_str == "STOP_CLIENT" {
-                    println!("⏭️  Stopping current client, moving to next");
-                    continue;
-                } else if err_str == "ABORT_PROGRAM" {
-                    // Abort the entire program (e.g., login failure)
-                    eprintln!("🛑 Program aborted due to critical failure");
-                    return Err(e);
+                // Try to extract ControlFlowError from anyhow::Error
+                if let Some(cf_err) = e.downcast_ref::<ControlFlowError>() {
+                    match cf_err {
+                        ControlFlowError::StopClient => {
+                            // Continue to next step (next client)
+                            println!("⏭️  Stopping current client, moving to next");
+                            continue;
+                        }
+                        ControlFlowError::AbortProgram => {
+                            // Abort the entire program (e.g., login failure)
+                            eprintln!("🛑 Program aborted due to critical failure");
+                            return Err(ControlFlowError::AbortProgram.into());
+                        }
+                        ControlFlowError::Other(_) => return Err(e),
+                    }
                 } else {
                     return Err(e);
                 }

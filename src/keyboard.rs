@@ -77,18 +77,3 @@ fn capitalize_first(s: &str) -> String {
         Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
     }
 }
-
-
-/*
-pub fn xdotool_key(display: &str, key: &str) -> Result<()> {
-    let status = Command::new("xdotool")
-        .env("DISPLAY", display)
-        .args(["key", "--clearmodifiers", key])
-        .status()?;
-
-    if !status.success() {
-        bail!("xdotool key failed");
-    }
-    Ok(())
-}
-*/
