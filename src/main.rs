@@ -64,6 +64,9 @@ async fn execute_step(
     openai_cfg: &Option<openai_client::OpenAIConfig>,
 ) -> Result<()> {
     match step {
+        Step::BeginClient { row } => {
+            println!("👤 Begin client block (sheet row={row})");
+        }
         Step::VisitUrl { url, .. } => {
             println!("🌐 Visit: {}", url);
             bundle.driver.goto(url).await?;
@@ -356,8 +359,11 @@ async fn main() -> Result<()> {
     // OpenAI is only needed for ClickByLlm steps
     let openai_cfg = OpenAIConfig::from_env().ok();
 
-    // Execute each step in order
-    for (step_idx, step) in plan.steps.iter().enumerate() {
+    // Execute each step in order. Use an index-based loop so `StopClient` can fast-forward
+    // to the next `BeginClient` marker in a flat plan.
+    let mut step_idx: usize = 0;
+    while step_idx < plan.steps.len() {
+        let step = &plan.steps[step_idx];
         let step_label = format!("Step {}", step_idx + 1);
         // Execute the step with recursive validation checking
         match execute_step_with_validation(step, &mut bundle, &display, &openai_cfg, Some(&step_label)).await {
@@ -367,8 +373,17 @@ async fn main() -> Result<()> {
                 if let Some(cf_err) = e.downcast_ref::<ControlFlowError>() {
                     match cf_err {
                         ControlFlowError::StopClient => {
-                            // Continue to next step (next client)
-                            println!("⏭️  Stopping current client, moving to next");
+                            // Skip the remainder of this client's steps by scanning forward
+                            // to the next BeginClient marker.
+                            println!("⏭️  Stopping current client, skipping to next client");
+                            let mut i = step_idx + 1;
+                            while i < plan.steps.len() {
+                                if matches!(plan.steps[i], Step::BeginClient { .. }) {
+                                    break;
+                                }
+                                i += 1;
+                            }
+                            step_idx = i;
                             continue;
                         }
                         ControlFlowError::AbortProgram => {
@@ -383,6 +398,7 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        step_idx += 1;
     }
  
     // Cleanup and exit
