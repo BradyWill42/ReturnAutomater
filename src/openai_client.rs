@@ -12,9 +12,67 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::task::JoinSet;
+use std::sync::{Mutex, OnceLock};
 
 
 // NEW: simple in-process memory of previously chosen points
+
+// Rate limit tracking to prevent crashes from excessive rate limiting
+struct RateLimitTracker {
+    consecutive_failures: usize,
+    last_failure_time: Option<SystemTime>,
+}
+
+impl RateLimitTracker {
+    fn new() -> Self {
+        Self {
+            consecutive_failures: 0,
+            last_failure_time: None,
+        }
+    }
+
+    fn record_failure(&mut self) {
+        self.consecutive_failures += 1;
+        self.last_failure_time = Some(SystemTime::now());
+    }
+
+    fn record_success(&mut self) {
+        self.consecutive_failures = 0;
+        self.last_failure_time = None;
+    }
+
+    fn should_pause(&self) -> bool {
+        let threshold = env::var("OPENAI_RATE_LIMIT_PAUSE_THRESHOLD")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(3);
+        self.consecutive_failures >= threshold
+    }
+
+    fn get_pause_duration(&self) -> Duration {
+        let pause_minutes = env::var("OPENAI_RATE_LIMIT_PAUSE_MINUTES")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(5);
+        Duration::from_secs(pause_minutes * 60)
+    }
+}
+
+// Global rate limit tracker (thread-safe)
+static RATE_LIMIT_TRACKER: OnceLock<Mutex<RateLimitTracker>> = OnceLock::new();
+
+fn get_rate_limit_tracker() -> &'static Mutex<RateLimitTracker> {
+    RATE_LIMIT_TRACKER.get_or_init(|| Mutex::new(RateLimitTracker::new()))
+}
+
+// Helper to safely access the tracker
+fn with_rate_limit_tracker<F, R>(f: F) -> R
+where
+    F: FnOnce(&mut RateLimitTracker) -> R,
+{
+    let mut tracker = get_rate_limit_tracker().lock().unwrap();
+    f(&mut tracker)
+}
 
 #[derive(Debug, Clone)]
 pub struct OpenAIConfig {
@@ -468,6 +526,18 @@ pub async fn call_openai_for_dom_decision(
     user_prompt: &str,
     candidates: &[UiCandidate],
 ) -> Result<ClickDecision> {
+    // Check if we should pause due to excessive rate limiting
+    let should_pause = with_rate_limit_tracker(|tracker| tracker.should_pause());
+    if should_pause {
+        let pause_duration = with_rate_limit_tracker(|tracker| tracker.get_pause_duration());
+        let pause_secs = pause_duration.as_secs();
+        eprintln!("⚠️  Excessive rate limiting detected. Pausing for {} minutes to allow rate limits to reset...", pause_secs / 60);
+        tokio::time::sleep(pause_duration).await;
+        eprintln!("✅ Resuming after rate limit pause");
+        // Reset counter after pause
+        with_rate_limit_tracker(|tracker| tracker.record_success());
+    }
+
     let client = reqwest::Client::builder().timeout(cfg.timeout).build()?;
 
     // Keep the message contract the same but a tad stricter about JSON
@@ -501,6 +571,7 @@ pub async fn call_openai_for_dom_decision(
 
     let url = format!("{}/chat/completions", cfg.base_url);
     let mut last_err: Option<anyhow::Error> = None;
+    let mut rate_limited = false;
 
     for attempt in 0..cfg.max_retries {
         let resp = client
@@ -517,6 +588,7 @@ pub async fn call_openai_for_dom_decision(
                     let headers = r.headers().clone();
                     let text = r.text().await.unwrap_or_default();
                     if status.as_u16() == 429 {
+                        rate_limited = true;
                         let wait_ms = compute_rate_limit_sleep_ms(&headers, &text, attempt);
                         eprintln!("⏳ 429 rate-limited (attempt {}/{}) sleep {}ms",
                                   attempt + 1, cfg.max_retries, wait_ms);
@@ -525,6 +597,9 @@ pub async fn call_openai_for_dom_decision(
                     }
                     last_err = Some(anyhow::anyhow!("OpenAI HTTP {}: {}", status, text));
                 } else {
+                    // Success - reset rate limit tracker
+                    with_rate_limit_tracker(|tracker| tracker.record_success());
+                    
                     let parsed: ChatResponse = r.json().await?;
                     let content = parsed
                         .choices
@@ -559,6 +634,11 @@ pub async fn call_openai_for_dom_decision(
         if attempt + 1 < cfg.max_retries {
             tokio::time::sleep(std::time::Duration::from_millis(350 * (attempt as u64 + 1))).await;
         }
+    }
+
+    // If we exhausted retries due to rate limiting, record the failure
+    if rate_limited {
+        with_rate_limit_tracker(|tracker| tracker.record_failure());
     }
 
     Err(last_err.unwrap_or_else(|| anyhow::anyhow!("OpenAI decision request failed")))
@@ -701,6 +781,18 @@ pub async fn call_openai_for_point(
     screenshot_png: &[u8],
     user_prompt: &str,
 ) -> Result<ViewportPoint> {
+    // Check if we should pause due to excessive rate limiting BEFORE spawning concurrent requests
+    let should_pause = with_rate_limit_tracker(|tracker| tracker.should_pause());
+    if should_pause {
+        let pause_duration = with_rate_limit_tracker(|tracker| tracker.get_pause_duration());
+        let pause_secs = pause_duration.as_secs();
+        eprintln!("⚠️  Excessive rate limiting detected. Pausing for {} minutes to allow rate limits to reset...", pause_secs / 60);
+        tokio::time::sleep(pause_duration).await;
+        eprintln!("✅ Resuming after rate limit pause");
+        // Reset counter after pause
+        with_rate_limit_tracker(|tracker| tracker.record_success());
+    }
+
     let samples: usize = env::var("OPENAI_SAMPLES_PER_CALL")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -749,6 +841,9 @@ pub async fn call_openai_for_point(
     let mut launched = initial;
 
     let mut results: Vec<ViewportPoint> = Vec::with_capacity(samples);
+    let mut rate_limit_failures = 0;
+    let mut total_failures = 0;
+    
     while let Some(joined) = set.join_next().await {
         match joined {
             Ok((idx, Ok(pt))) => {
@@ -756,9 +851,22 @@ pub async fn call_openai_for_point(
                 results.push(pt);
             }
             Ok((_idx, Err(e))) => {
+                total_failures += 1;
+                // Check if the error is related to rate limiting
+                // call_openai_once now includes "(rate limited)" in the error message
+                // when it encounters 429 errors, so we can detect it
+                let error_str = e.to_string().to_lowercase();
+                if error_str.contains("429") || error_str.contains("rate") || 
+                   error_str.contains("rate limit") || error_str.contains("ratelimit") ||
+                   error_str.contains("(rate limited)") {
+                    rate_limit_failures += 1;
+                }
                 eprintln!("   ⚠️ sample failed: {e}");
             }
-            Err(e) => eprintln!("   ⚠️ task join error: {e}"),
+            Err(e) => {
+                total_failures += 1;
+                eprintln!("   ⚠️ task join error: {e}");
+            }
         }
 
         if launched < samples {
@@ -779,6 +887,29 @@ pub async fn call_openai_for_point(
         }
     }
 
+    // Track failures: if all samples failed, it's likely rate limiting
+    // Record a single failure (not per sample) to avoid overwhelming the tracker
+    if results.is_empty() {
+        // All samples failed - if we saw rate limit errors, definitely record it
+        // Even if we didn't detect them in error messages, concurrent failures
+        // when making many requests is very likely rate limiting
+        with_rate_limit_tracker(|tracker| tracker.record_failure());
+        if rate_limit_failures > 0 {
+            eprintln!("   ⚠️ All {} samples failed ({} confirmed rate-limit related)", 
+                      samples, rate_limit_failures);
+        } else {
+            eprintln!("   ⚠️ All {} samples failed (likely rate limiting)", samples);
+        }
+    } else if rate_limit_failures > 0 && rate_limit_failures >= total_failures / 2 {
+        // More than half of failures were rate-limit related
+        // This suggests we're hitting rate limits even if some requests succeed
+        with_rate_limit_tracker(|tracker| tracker.record_failure());
+    } else if results.len() > 0 {
+        // We got at least one successful result - reset the failure counter
+        // This means we're not completely blocked
+        with_rate_limit_tracker(|tracker| tracker.record_success());
+    }
+
     if results.is_empty() {
         anyhow::bail!("All OpenAI samples failed");
     }
@@ -796,6 +927,18 @@ async fn call_openai_once(
     screenshot_png: &[u8],
     user_prompt: &str,
 ) -> Result<ViewportPoint> {
+    // Check if we should pause due to excessive rate limiting
+    let should_pause = with_rate_limit_tracker(|tracker| tracker.should_pause());
+    if should_pause {
+        let pause_duration = with_rate_limit_tracker(|tracker| tracker.get_pause_duration());
+        let pause_secs = pause_duration.as_secs();
+        eprintln!("⚠️  Excessive rate limiting detected. Pausing for {} minutes to allow rate limits to reset...", pause_secs / 60);
+        tokio::time::sleep(pause_duration).await;
+        eprintln!("✅ Resuming after rate limit pause");
+        // Reset counter after pause
+        with_rate_limit_tracker(|tracker| tracker.record_success());
+    }
+
     let client = reqwest::Client::builder().timeout(cfg.timeout).build()?;
 
     let overlay_enabled = env::var("OPENAI_OVERLAY_GRID")
@@ -845,6 +988,7 @@ async fn call_openai_once(
 
     let url = format!("{}/chat/completions", cfg.base_url);
     let mut last_err: Option<anyhow::Error> = None;
+    let mut encountered_429 = false;
 
     for attempt in 0..cfg.max_retries {
         let resp = client
@@ -864,6 +1008,7 @@ async fn call_openai_once(
 		    let text = r.text().await.unwrap_or_default();
   		    
                     if status.as_u16() == 429 {
+                        encountered_429 = true;
                         let wait_ms = compute_rate_limit_sleep_ms(&headers, &text, attempt);
                         eprintln!(
                             "⏳ 429 rate-limited (attempt {}/{}). Sleeping ~{} ms",
@@ -876,6 +1021,9 @@ async fn call_openai_once(
                     // other non-success -> record and try again with small backoff
                     last_err = Some(anyhow::anyhow!("OpenAI HTTP {}: {}", status, text));
                 } else {
+                    // Success - reset rate limit tracker
+                    with_rate_limit_tracker(|tracker| tracker.record_success());
+                    
                     // (optional) read rate limit info for diagnostic
                     let remaining_tokens = r.headers()
                         .get("x-ratelimit-remaining-tokens")
@@ -946,7 +1094,17 @@ async fn call_openai_once(
         }
     }
 
-    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("OpenAI request failed")))
+    // Note: We don't record failures here because call_openai_once is only called
+    // from call_openai_for_point, which handles failure tracking at a higher level
+    // to avoid recording multiple failures for concurrent requests
+    // However, we include rate limit info in the error message for better detection
+
+    let error_msg = if encountered_429 {
+        "OpenAI request failed (rate limited)".to_string()
+    } else {
+        "OpenAI request failed".to_string()
+    };
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!(error_msg)))
 }
 
 fn aggregate_points(points: &[ViewportPoint]) -> ViewportPoint {
@@ -1263,6 +1421,18 @@ pub async fn ask_boolean_question(
     screenshot_png: &[u8],
     question: &str,
 ) -> Result<BooleanResponse> {
+    // Check if we should pause due to excessive rate limiting
+    let should_pause = with_rate_limit_tracker(|tracker| tracker.should_pause());
+    if should_pause {
+        let pause_duration = with_rate_limit_tracker(|tracker| tracker.get_pause_duration());
+        let pause_secs = pause_duration.as_secs();
+        eprintln!("⚠️  Excessive rate limiting detected. Pausing for {} minutes to allow rate limits to reset...", pause_secs / 60);
+        tokio::time::sleep(pause_duration).await;
+        eprintln!("✅ Resuming after rate limit pause");
+        // Reset counter after pause
+        with_rate_limit_tracker(|tracker| tracker.record_success());
+    }
+
     let client = reqwest::Client::builder().timeout(cfg.timeout).build()?;
     
     let b64 = base64::engine::general_purpose::STANDARD.encode(screenshot_png);
@@ -1301,6 +1471,7 @@ pub async fn ask_boolean_question(
     
     let url = format!("{}/chat/completions", cfg.base_url);
     let mut last_err: Option<anyhow::Error> = None;
+    let mut rate_limited = false;
     
     for attempt in 0..cfg.max_retries {
         let resp = client
@@ -1318,6 +1489,7 @@ pub async fn ask_boolean_question(
                     let text = r.text().await.unwrap_or_default();
                     
                     if status.as_u16() == 429 {
+                        rate_limited = true;
                         let wait_ms = compute_rate_limit_sleep_ms(&headers, &text, attempt);
                         eprintln!(
                             "⏳ 429 rate-limited (attempt {}/{}). Sleeping ~{} ms",
@@ -1329,6 +1501,9 @@ pub async fn ask_boolean_question(
                     
                     last_err = Some(anyhow::anyhow!("OpenAI HTTP {}: {}", status, text));
                 } else {
+                    // Success - reset rate limit tracker
+                    with_rate_limit_tracker(|tracker| tracker.record_success());
+                    
                     let parsed: ChatResponse = r.json().await?;
                     let content = parsed
                         .choices
@@ -1369,6 +1544,11 @@ pub async fn ask_boolean_question(
         if attempt + 1 < cfg.max_retries {
             tokio::time::sleep(Duration::from_millis(400 * (attempt as u64 + 1))).await;
         }
+    }
+    
+    // If we exhausted retries due to rate limiting, record the failure
+    if rate_limited {
+        with_rate_limit_tracker(|tracker| tracker.record_failure());
     }
     
     Err(last_err.unwrap_or_else(|| anyhow::anyhow!("OpenAI boolean question request failed")))
