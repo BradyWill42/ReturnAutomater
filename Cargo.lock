@@ -1366,6 +1366,7 @@ dependencies = [
  "imageproc",
  "keeper-secrets-manager-core",
  "reqwest 0.11.27",
+ "ring 0.17.14",
  "serde",
  "serde_json",
  "thirtyfour",

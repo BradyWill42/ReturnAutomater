@@ -243,7 +243,7 @@ async fn execute_step_with_validation(
     if let Some(ref cfg) = openai_cfg.as_ref() {
         if let Some(question) = step.validation_question() {
             // Wait for page to settle (2 seconds to capture current state)
-            sleep(Duration::from_millis(2000)).await;
+            sleep(Duration::from_millis(5000)).await;
             
             // Determine where to save validation screenshot (current run directory)
             let run_dir = get_largest_run_dir()

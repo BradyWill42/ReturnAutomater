@@ -17,3 +17,4 @@ reqwest = { version = "0.11", features = ["json", "rustls-tls"] }
 thirtyfour = { version = "0.33", default-features = true }
 keeper-secrets-manager-core = "17"
 yup-oauth2 = "7"
+ring = "0.17.12"
