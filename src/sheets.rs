@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::sync::Arc;
-use yup_oauth2::ServiceAccountAuthenticator;
+use yup_oauth2::authenticator::TokenProvider;
 
 #[derive(Deserialize)]
 struct SheetValuesResponse {
@@ -36,7 +36,7 @@ pub async fn fetch_sheet_values() -> Result<Vec<Vec<String>>> {
 pub struct SheetsClient {
     spreadsheet_id: String,
     sheet_id: i32,
-    auth: Arc<ServiceAccountAuthenticator>,
+    auth: Arc<dyn TokenProvider>,
     http: reqwest::Client,
 }
 
@@ -53,7 +53,7 @@ impl SheetsClient {
             .await
             .context("Failed to read service account JSON")?;
 
-        let auth = ServiceAccountAuthenticator::builder(sa_key)
+        let auth = yup_oauth2::ServiceAccountAuthenticator::builder(sa_key)
             .build()
             .await
             .context("Failed to build service account authenticator")?;
