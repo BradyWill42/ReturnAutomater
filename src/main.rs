@@ -21,6 +21,7 @@ use driver::{init_driver, cleanup_driver, screenshot_bytes};
 use mouse::{ensure_xdotool, reset_zoom, get_active_window_geometry, get_display_geometry, xdotool_move_and_click};
 use coords::{png_dimensions, NormalizationInputs, viewport_to_screen};
 use plan::{AutomationPlan, Step, fetch_keeper_creds_sync};
+use crate::client::ClientStore;
 use tokio::time::{sleep, Duration};
 use keyboard::type_text;
 use thirtyfour::By;
@@ -215,6 +216,10 @@ async fn execute_step(
                 eprintln!("⚠️ Failed to update sheet cell: {}", e);
                 // Don't fail the whole automation if sheet update fails
             }
+            
+            // Track consecutive failures: if ME column is marked red (failure), increment counter
+            // If marked green (success), reset counter. Yellow is ignored.
+            // Note: This needs access to consecutive_failures, so we'll handle it in the caller
         }
         Step::StopClient => {
             println!("⏹️  Stopping execution for current client");
@@ -359,15 +364,52 @@ async fn main() -> Result<()> {
     // OpenAI is only needed for ClickByLlm steps
     let openai_cfg = OpenAIConfig::from_env().ok();
 
+    // Track consecutive client failures - abort if 5 fail in a row
+    let mut consecutive_failures = 0;
+    let max_consecutive_failures = std::env::var("MAX_CONSECUTIVE_FAILURES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5);
+    
+    // Track the ME column index to detect client failures
+    let me_col = ClientStore::from_sheet_values(&values)?
+        .me_column_index;
+
     // Execute each step in order. Use an index-based loop so `StopClient` can fast-forward
     // to the next `BeginClient` marker in a flat plan.
     let mut step_idx: usize = 0;
     while step_idx < plan.steps.len() {
         let step = &plan.steps[step_idx];
         let step_label = format!("Step {}", step_idx + 1);
+        
         // Execute the step with recursive validation checking
         match execute_step_with_validation(step, &mut bundle, &display, &openai_cfg, Some(&step_label)).await {
-            Ok(()) => {},
+            Ok(()) => {
+                // After successful step execution, check if this was an UpdateSheetCell updating the ME column
+                // Track failures for consecutive failure detection
+                if let Step::UpdateSheetCell { col, success, yellow, .. } = step {
+                    if *col == me_col && !*yellow {
+                        if *success {
+                            // Green ME cell = client succeeded, reset failure counter
+                            if consecutive_failures > 0 {
+                                println!("✅ Client succeeded, resetting consecutive failure counter (was {})", consecutive_failures);
+                            }
+                            consecutive_failures = 0;
+                        } else {
+                            // Red ME cell = client failed, increment failure counter
+                            consecutive_failures += 1;
+                            println!("❌ Client failed (consecutive failures: {}/{})", consecutive_failures, max_consecutive_failures);
+                            
+                            // Abort if we've hit the threshold
+                            if consecutive_failures >= max_consecutive_failures {
+                                eprintln!("🛑 Aborting program: {} consecutive client failures reached (threshold: {})", 
+                                          consecutive_failures, max_consecutive_failures);
+                                return Err(ControlFlowError::AbortProgram.into());
+                            }
+                        }
+                    }
+                }
+            },
             Err(e) => {
                 // Try to extract ControlFlowError from anyhow::Error
                 if let Some(cf_err) = e.downcast_ref::<ControlFlowError>() {
