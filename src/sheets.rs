@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::sync::Arc;
-use yup_oauth2::authenticator::TokenProvider;
+use yup_oauth2::TokenProvider;
 
 #[derive(Deserialize)]
 struct SheetValuesResponse {
