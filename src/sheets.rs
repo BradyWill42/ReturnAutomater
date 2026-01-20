@@ -28,10 +28,47 @@ pub struct SheetsClient {
     spreadsheet_id: String,
     sheet_name: String,
     sheet_id: i32,
-    auth: yup_oauth2::ServiceAccountAuthenticator,
+    sa_path: String,
 }
 
 impl SheetsClient {
+    /// Global throttle to avoid Google Sheets write quota (commonly 60 writes/min/user).
+    /// Enforces ~1 write / 1100ms across the whole process.
+    async fn throttle_write_request() {
+        struct State {
+            next_allowed: std::time::Instant,
+        }
+
+        static RATE: std::sync::OnceLock<std::sync::Mutex<State>> = std::sync::OnceLock::new();
+        let m = RATE.get_or_init(|| {
+            std::sync::Mutex::new(State {
+                next_allowed: std::time::Instant::now(),
+            })
+        });
+
+        let interval = std::time::Duration::from_millis(1100);
+        let wait = {
+            let mut st = m.lock().unwrap();
+            let now = std::time::Instant::now();
+            if st.next_allowed > now {
+                let wait = st.next_allowed - now;
+                st.next_allowed = st.next_allowed + interval;
+                wait
+            } else {
+                st.next_allowed = now + interval;
+                std::time::Duration::from_secs(0)
+            }
+        };
+
+        if wait.as_millis() > 0 {
+            tokio::time::sleep(wait).await;
+        }
+    }
+
+    pub fn sheet_name(&self) -> &str {
+        &self.sheet_name
+    }
+
     /// Builds the service-account authenticator ONCE.
     /// Env:
     /// - SHEETS_ID
@@ -62,21 +99,40 @@ impl SheetsClient {
         let http = reqwest::Client::new();
 
         // Resolve sheetId once (DO NOT assume 0)
-        let sheet_id = Self::resolve_sheet_id(&http, &auth, &spreadsheet_id, &sheet_name).await?;
+        let scopes = &["https://www.googleapis.com/auth/spreadsheets"];
+        let token = auth
+            .token(scopes)
+            .await
+            .context("Failed to obtain service account access token")?
+            .as_ref()
+            .to_string();
+        let sheet_id =
+            Self::resolve_sheet_id(&http, &token, &spreadsheet_id, &sheet_name).await?;
 
         Ok(Self {
             http,
             spreadsheet_id,
             sheet_name,
             sheet_id,
-            auth,
+            sa_path,
         })
     }
 
     async fn bearer_token(&self) -> Result<String> {
+        let key = yup_oauth2::read_service_account_key(&self.sa_path)
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to read service account key at: {}",
+                    self.sa_path
+                )
+            })?;
+        let auth = yup_oauth2::ServiceAccountAuthenticator::builder(key)
+            .build()
+            .await
+            .context("Failed to build ServiceAccountAuthenticator")?;
         let scopes = &["https://www.googleapis.com/auth/spreadsheets"];
-        let token = self
-            .auth
+        let token = auth
             .token(scopes)
             .await
             .context("Failed to obtain service account access token")?;
@@ -85,13 +141,10 @@ impl SheetsClient {
 
     async fn resolve_sheet_id(
         http: &reqwest::Client,
-        auth: &yup_oauth2::ServiceAccountAuthenticator,
+        token: &str,
         spreadsheet_id: &str,
         sheet_name: &str,
     ) -> Result<i32> {
-        let scopes = &["https://www.googleapis.com/auth/spreadsheets"];
-        let token = auth.token(scopes).await?.as_ref().to_string();
-
         let url = format!(
             "https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}?fields=sheets.properties"
         );
@@ -208,21 +261,43 @@ impl SheetsClient {
             self.spreadsheet_id
         );
 
-        let resp = self.http
-            .post(&url)
-            .bearer_auth(token)
-            .json(&batch_update)
-            .send()
-            .await?;
+        // Retry on 429 (rate limit) with backoff; also throttle requests globally.
+        let mut attempt: u32 = 0;
+        loop {
+            attempt += 1;
+            Self::throttle_write_request().await;
 
-        if !resp.status().is_success() {
+            let resp = self
+                .http
+                .post(&url)
+                .bearer_auth(&token)
+                .json(&batch_update)
+                .send()
+                .await?;
+
+            if resp.status().is_success() {
+                return Ok(());
+            }
+
             // Include body: Google puts the real reason there (permissions, invalid sheetId, etc.)
             let status = resp.status();
+            let retry_after_secs = resp
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok());
             let body = resp.text().await.unwrap_or_default();
+
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS && attempt < 8 {
+                // Exponential backoff, but honor Retry-After if present.
+                let backoff_secs = 2u64.pow((attempt - 1).min(6));
+                let sleep_secs = retry_after_secs.unwrap_or(backoff_secs).min(120);
+                tokio::time::sleep(std::time::Duration::from_secs(sleep_secs)).await;
+                continue;
+            }
+
             anyhow::bail!("Sheets batchUpdate failed: {status} body={body}");
         }
-
-        Ok(())
     }
 }
 

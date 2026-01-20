@@ -26,7 +26,7 @@ use plan::{AutomationPlan, Step, fetch_keeper_creds_sync};
 use tokio::time::{sleep, Duration};
 use keyboard::type_text;
 use thirtyfour::By;
-use sheets::{fetch_sheet_values, SheetsClient};
+use sheets::SheetsClient;
 use std::fs;
 
 /// Control-flow signals for automation
@@ -184,6 +184,29 @@ async fn execute_step(
                 .await?;
         }
 
+        Step::UpdateMeBasedOnColumns { row, me_col, me_value, check_columns } => {
+            // Read each operation column and check if all are "Y"
+            let mut all_passed = true;
+            for col in check_columns {
+                let cell_value = sheets.read_cell_value(*row, *col).await?;
+                if cell_value.trim().to_uppercase() != "Y" {
+                    all_passed = false;
+                    break;
+                }
+            }
+
+            // Update ME: green if all passed, red otherwise
+            let color = if all_passed {
+                (0, 255, 0)  // Green
+            } else {
+                (255, 0, 0)  // Red
+            };
+
+            sheets
+                .update_cell_value_and_color(*row, *me_col, me_value, color)
+                .await?;
+        }
+
         Step::StopClient => {
             return Err(ControlFlowError::StopClient.into());
         }
@@ -207,11 +230,14 @@ async fn main() -> Result<()> {
     let mut bundle = init_driver(&login_url).await?;
     let display = bundle.display.clone();
 
-    // 🔑 READ sheet once (API key)
-    let values = fetch_sheet_values().await?;
-
     // 🔑 BUILD OAuth ONCE
     let sheets = SheetsClient::new_from_env().await?;
+
+    // 🔑 READ sheet once using the client
+    let sheet_name = sheets.sheet_name();
+    let range = std::env::var("SHEETS_RANGE")
+        .unwrap_or_else(|_| format!("{}!A1:Z1000", sheet_name));
+    let values = sheets.fetch_sheet_values(&range).await?;
 
     let plan = AutomationPlan::client_loop(&values)?;
     let openai_cfg = OpenAIConfig::from_env().ok();

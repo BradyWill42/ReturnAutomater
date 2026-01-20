@@ -41,38 +41,38 @@ impl Client {
     }
 
     pub fn docs_url(&self) -> String {
-	let base = std::env::var("USER_PORTAL_A").unwrap_or_default();
-	let post = std::env::var("DOCS_PORTAL").unwrap_or_default();
-	format!("{base}{}{post}", self.client_id)
+        let base = std::env::var("USER_PORTAL_A").unwrap_or_default();
+        let post = std::env::var("DOCS_PORTAL").unwrap_or_default();
+        format!("{base}{}{post}", self.client_id)
     }
 
     pub fn pipeline_url(&self) -> String {
-	let base = std::env::var("USER_PORTAL_A").unwrap_or_default();
-	let post = std::env::var("PIPELINE_PORTAL").unwrap_or_default();
-	format!("{base}{}{post}", self.client_id)
+        let base = std::env::var("USER_PORTAL_A").unwrap_or_default();
+        let post = std::env::var("PIPELINE_PORTAL").unwrap_or_default();
+        format!("{base}{}{post}", self.client_id)
     }
     
     pub fn email_template(&self) -> Vec<String> {
- 	let mut templates = Vec::new();
+        let mut templates = Vec::new();
 
-	if !self.email_temp1.trim().is_empty() {
-	    templates.push(self.email_temp1.trim().to_string());
-	}	
+        if !self.email_temp1.trim().is_empty() {
+            templates.push(self.email_temp1.trim().to_string());
+        }	
 
-	if !self.email_temp2.trim().is_empty() {
-	    templates.push(self.email_temp2.trim().to_string());
-	}
-	
-	templates
+        if !self.email_temp2.trim().is_empty() {
+            templates.push(self.email_temp2.trim().to_string());
+        }
+        
+        templates
     }
     
     pub fn est_qtr(&self) -> Vec<String> {
-	let mut estimates = Vec::new();
-	
-	if !self.estimate_quarterlies.trim().is_empty() {
-	    estimates.push(self.estimate_quarterlies.trim().to_string());
-   	}
-	estimates
+        let mut estimates = Vec::new();
+        
+        if !self.estimate_quarterlies.trim().is_empty() {
+            estimates.push(self.estimate_quarterlies.trim().to_string());
+        }
+        estimates
     }
 }
 
