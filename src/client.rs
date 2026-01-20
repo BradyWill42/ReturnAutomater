@@ -80,8 +80,10 @@ impl Client {
 #[derive(Debug, Default)]
 pub struct ClientStore {
     pub clients: Vec<Client>,
-    pub seal_column_index: usize, // 1-based column index for "Seal" column
-    pub me_column_index: usize,   // 1-based column index for "ME" column
+    pub seal_column_index: usize,   // 1-based column index for "Seal" column
+    pub me_column_index: usize,     // 1-based column index for "ME" column
+    pub email1_column_index: usize, // 1-based column index for "EmailTemp1" column
+    pub email2_column_index: usize, // 1-based column index for "EmailTemp2" column
 }
 
 #[allow(dead_code)]
@@ -90,8 +92,10 @@ impl ClientStore {
     pub fn new() -> Self {
         Self { 
             clients: Vec::new(),
-            seal_column_index: 0, // Will be set when loading from sheet
-            me_column_index: 0,   // Will be set when loading from sheet
+            seal_column_index: 0,   // Will be set when loading from sheet
+            me_column_index: 0,     // Will be set when loading from sheet
+            email1_column_index: 0, // Will be set when loading from sheet
+            email2_column_index: 0, // Will be set when loading from sheet
         }
     }
 
@@ -144,11 +148,12 @@ impl ClientStore {
         let c_pipeline = idx("Pipeline")?;
         let c_seal = idx("Seal")?;
         let c_year_to_seal = idx("YearToSeal")?;
-
         let mut store = ClientStore {
             clients: Vec::new(),
-            seal_column_index: c_seal + 1, // Convert 0-based to 1-based
-            me_column_index: c_me + 1,     // Convert 0-based to 1-based
+            seal_column_index: c_seal + 1,     // Convert 0-based to 1-based
+            me_column_index: c_me + 1,         // Convert 0-based to 1-based
+            email1_column_index: c_email1 + 1, // Convert 0-based to 1-based
+            email2_column_index: c_email2 + 1, // Convert 0-based to 1-based
         };
 
         for (row_idx, row) in values.iter().skip(1).enumerate() {
